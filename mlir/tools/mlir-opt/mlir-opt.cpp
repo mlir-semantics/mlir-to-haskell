@@ -63,6 +63,7 @@ void registerTestSpirvModuleCombinerPass();
 void registerTestTraitsPass();
 void registerTosaTestQuantUtilAPIPass();
 void registerVectorizerTestPass();
+void registerHaskellPrintingPass();
 
 namespace test {
 void registerCommutativityUtils();
@@ -185,6 +186,7 @@ void registerTestPasses() {
   registerTestTraitsPass();
   registerVectorizerTestPass();
   registerTosaTestQuantUtilAPIPass();
+  registerHaskellPrintingPass();
 
   mlir::test::registerCommutativityUtils();
   mlir::test::registerConvertCallOpPass();

@@ -23,6 +23,7 @@ add_mlir_library(MLIRTestIR
   TestUseListOrders.cpp
   TestVisitors.cpp
   TestVisitorsGeneric.cpp
+  HaskellPrinting.cpp
 
   EXCLUDE_FROM_LIBMLIR
 
