@@ -21,50 +21,23 @@ struct HaskellPrintingPass
   /// the IR: operation->region->block->operation->...
 
   void printOperation(Operation *op) {
-    // print the operation's attached region
-    // for (Region &region : op->getRegions())
-    //     printRegion(region);
-
-    // // Print the operation itself and some of its properties
-	auto& stream = printOpLine(printIndent(), op) << " ";
-    stream << "visiting op: '" << op->getName() << "' with "
-		   << op->getNumOperands() << " operands and "
-		   << op->getNumResults() << " results\n";
-    // Print the operation attributes
-    if (!op->getAttrs().empty()) {
-      printIndent() << op->getAttrs().size() << " attributes:\n";
-      for (NamedAttribute attr : op->getAttrs())
-        printIndent() << " - '" << attr.getName().getValue() << "' : '"
-                      << attr.getValue() << "'\n";
-    }
+    // Print the operation itself and some of its properties
+	printOpLine(printIndent(), op) << "\n";
 
     // Recurse into each of the regions attached to the operation.
-    printIndent() << " " << op->getNumRegions() << " nested regions:\n";
-    auto indent = pushIndent();
     for (Region &region : op->getRegions())
       printRegion(region);
   }
 
   void printRegion(Region &region) {
     // A region does not hold anything by itself other than a list of blocks.
-    printIndent() << "Region with " << region.getBlocks().size()
-                  << " blocks:\n";
-    auto indent = pushIndent();
+	auto indent = pushIndent();
     for (Block &block : region.getBlocks())
       printBlock(block);
   }
 
   void printBlock(Block &block) {
-    // Print the block intrinsics properties (basically: argument list)
-    printIndent()
-        << "Block with " << block.getNumArguments() << " arguments, "
-        << block.getNumSuccessors()
-        << " successors, and "
-        // Note, this `.size()` is traversing a linked-list and is O(n).
-        << block.getOperations().size() << " operations\n";
-
     // Block main role is to hold a list of Operations: let's recurse.
-    auto indent = pushIndent();
     for (Operation &op : block.getOperations())
       printOperation(&op);
   }
@@ -82,7 +55,7 @@ struct HaskellPrintingPass
 
   llvm::raw_ostream &printIndent() {
     for (int i = 0; i < indent; ++i)
-      llvm::outs() << "  ";
+      llvm::outs() << "\t";
     return llvm::outs();
   }
 
@@ -98,10 +71,11 @@ private:
 	// print the operation, polymorphic on operation type
 	llvm::StringRef opName {op->getName().getStringRef()};
 
-	if (opName.equals("arith.addf")) hp.print(stream, llvm::dyn_cast<arith::AddFOp>(op));
-	else if (opName.equals("func.func")) hp.print(stream, llvm::dyn_cast<func::FuncOp>(op));
-	else if (opName.equals("func.call")) hp.print(stream, llvm::dyn_cast<func::CallOp>(op));
-	else if (opName.equals("func.return")) hp.print(stream, llvm::dyn_cast<func::ReturnOp>(op));
+	HaskellOpPrinter hp{stream};
+	if (hp.isStandard(opName)) hp.printStandard(opName, op);
+	else if (hp.isTerminator(opName)) hp.printTerminator(opName, op);
+	else if (opName.equals("func.func")) hp.print(llvm::dyn_cast<func::FuncOp>(op));
+	else if (opName.equals("func.call")) hp.print(llvm::dyn_cast<func::CallOp>(op));
 	else stream << "UNIMPLEMENTED OP " << op->getName();
 
 	return stream;
@@ -109,56 +83,108 @@ private:
 
   struct HaskellOpPrinter {
   public:
-	void print(llvm::raw_ostream &stream, arith::AddFOp op) {
-		stream << "add "; 
-		op.getLhs().printAsOperand(stream, OpPrintingFlags());
-		stream << " ";
-		op.getRhs().printAsOperand(stream, OpPrintingFlags());
+	HaskellOpPrinter(llvm::raw_ostream &stream) : pStream{&stream} {}; 
+
+  private:
+	llvm::raw_ostream *pStream;
+
+	/* access stream by reference */
+	llvm::raw_ostream &stream() { return *pStream; }; 
+
+	/* operations to be printed in the "Standard" form */
+	static llvm::StringMap<std::string> standardOps() {
+		return {
+			{"arith.addf", "add"},
+			{"arith.addi", "add"},
+			{"arith.mulf", "mult"},
+			{"arith.negf", "negative"},
+			{"arith.divf", "divide"},
+			{"arith.uitofp", "intToFp"},
+			{"index.sub", "sub"},
+			{"memref.dim", "dim"},
+			{"memref.dealloc", "deallocMemref"}
+		};
 	};
 
-	void print(llvm::raw_ostream &stream, func::FuncOp op) {
+	/* terminators ops, they all are printed in similar ways */
+	static llvm::StringMap<std::string> terminatorOps() {
+		return {
+			{"func.return", "return"},
+			{"scf.yield", "scfYield"},
+			{"affine.yield", "affineYield"}
+		};
+	};
+
+	template <typename Container>
+	void printValuesInterleave(const std::string &sep, const Container &c) {
+		llvm::interleave(c, stream(), [&](mlir::Value arg) { arg.printAsOperand(stream(), OpPrintingFlags()); }, sep.c_str());
+	}
+
+	void printOperandsInterleave(const std::string sep, Operation *op) {
+		printValuesInterleave(sep, op->getOperands());
+	}
+
+  public:
+	/* Check against predefined list of ops printed in the "Standard" form. */
+	bool isStandard(llvm::StringRef opName) { return standardOps().contains(opName); };
+
+	/* predefined list of terminator ops, which have the same printing form */
+	bool isTerminator(llvm::StringRef opName) { return terminatorOps().contains(opName); };
+
+	/* 
+	"Standard" case: prints into the form:
+		{standardOps[opName]} <operand0> <operand1> ... <operandn>
+	*/
+	void printStandard(llvm::StringRef opName, Operation *op) {
+		assert(isStandard(opName));
+		stream() << standardOps().at(opName) << " ";
+		printOperandsInterleave(" ", op);
+	};
+
+	/* 
+	"Terminators" case: prints into the form:
+		0 or >1 args:
+		{terminatorOps[opName]} (<operand0>, <operand1>, ... <operandn>)
+		1 arg:
+		{terminatorOps[opName]} operand0
+	*/
+	void printTerminator(llvm::StringRef opName, Operation *op) {
+		assert(isTerminator(opName));
+		stream() << terminatorOps().at(opName) << " ";
+
+		unsigned nOperands = op->getNumOperands(); 
+		if (nOperands == 1) {
+			op->getOperand(0).printAsOperand(stream(), OpPrintingFlags());
+		} else {
+			stream() << "(";
+			printOperandsInterleave(", ", op);
+			stream() << ")";
+		}
+	};
+
+	void print(arith::AddFOp op) {
+		stream() << "add "; 
+		printOperandsInterleave(" ", op);
+	};
+
+	void print(func::FuncOp op) {
 		// TODO: add function signature
-		stream << op.getSymName().str() << " ";
+		stream() << op.getSymName().str() << " ";
 
 		// print arg names, which are arguments to the first block in the attached region
 		Block& firstBlock { op.getRegion().front() };
-		for (unsigned i = 0; i < firstBlock.getNumArguments(); i++) {
-			firstBlock.getArgument(i).printAsOperand(stream, OpPrintingFlags());
-			stream << " ";
-		}
+		printValuesInterleave(" ", firstBlock.getArguments());
 		
 		// print bit before start of region
-		stream << "= do\n";
+		stream() << "= do";
+		// region will be printed in the parent call
 	};
 
-	void print(llvm::raw_ostream &stream, func::CallOp op) {
-		stream << op.getCallee().str() << " ";
-		for (unsigned i = 0; i < op.getNumOperands(); i++) {
-			op.getOperand(i).printAsOperand(stream, OpPrintingFlags());
-			stream << " ";
-		}
-	};
-
-	void print(llvm::raw_ostream &stream, func::ReturnOp op) {
-		stream << "return ";
-
-		unsigned nOperands = op.getNumOperands(); 
-		if (nOperands == 0) {
-			stream << "()";
-		} else if (nOperands == 1) {
-			op.getOperand(0).printAsOperand(stream, OpPrintingFlags());
-		} else {
-			stream << "(";
-			for (unsigned i = 0; i < nOperands-1; i++) {
-				op.getOperand(i).printAsOperand(stream, OpPrintingFlags());
-				stream << ", ";
-			}
-			op.getOperand(nOperands-1).printAsOperand(stream, OpPrintingFlags());
-			stream << ")";
-		}
+	void print(func::CallOp op) {
+		stream() << op.getCallee().str() << " ";
+		printOperandsInterleave(" ", op);
 	};
   };
-  HaskellOpPrinter hp;
 };
 } // namespace
 
