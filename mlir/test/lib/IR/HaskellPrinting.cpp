@@ -136,7 +136,7 @@ private:
 		if (t.isa<mlir::Float32Type>()) return "Float";
 		else if (t.isa<mlir::Float64Type>()) return "Double";
 		else if (t.isa<mlir::IndexType>()) return "IxType";
-		else if (t.isa<mlir::IntegerType>()) return "Int";
+		else if (auto mt = t.dyn_cast<mlir::MemRefType>()) return "MemrefType s " + embedType(mt.getElementType());
 		else return "UNSUPPORTED_TYPE";
 	}
 
@@ -251,7 +251,7 @@ private:
 		mlir::MemRefType memRefType = op.getType();
 
 		printResults(op); // SSA value
-		stream() << " :: MemrefType s " << embedType(memRefType.getElementType()) << " <- allocND ["; 
+		stream() << " :: " << embedType(memRefType) << " <- allocND [";
 		llvm::interleave( // print memref sizes
 			memRefType.getShape(), 
 			stream(), 
