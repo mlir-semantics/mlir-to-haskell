@@ -1,9 +1,14 @@
+// #include "llvm/IR/InstVisitor.h"
+#include "llvm/ADT/StringSet.h"
+
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
 // dialects
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Index/IR/IndexOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 
 using namespace mlir;
 
@@ -55,7 +60,7 @@ struct HaskellPrintingPass
 
   llvm::raw_ostream &printIndent() {
     for (int i = 0; i < indent; ++i)
-      llvm::outs() << "\t";
+      llvm::outs() << "    ";
     return llvm::outs();
   }
 
@@ -73,10 +78,13 @@ private:
 
 	HaskellOpPrinter hp{stream};
 	if (hp.isStandard(opName)) hp.printStandard(opName, op);
-	else if (hp.isTerminator(opName)) hp.printTerminator(opName, op);
+	else if (hp.supportedCasting(opName)) hp.printCasting(op);
+	else if (op->hasTrait<mlir::OpTrait::IsTerminator>()) hp.printTerminator(opName, op);
+	else if (op->hasTrait<mlir::OpTrait::ConstantLike>()) hp.printConstantLike(op);
 	else if (opName.equals("func.func")) hp.print(llvm::dyn_cast<func::FuncOp>(op));
 	else if (opName.equals("func.call")) hp.print(llvm::dyn_cast<func::CallOp>(op));
-	else stream << "UNIMPLEMENTED OP " << op->getName();
+	else if (opName.equals("memref.alloc")) hp.print(llvm::dyn_cast<memref::AllocOp>(op));
+	else stream << "UNIMPLEMENTED " << op->getName();
 
 	return stream;
   }
@@ -106,6 +114,14 @@ private:
 		};
 	};
 
+	/* casting ops have trivial embedding in Haskell, and will be translated as `return` */
+	static llvm::StringSet<> castingOps() {
+		return {
+			"index.casts",
+			"memref.cast"
+		};
+	};
+
 	/* terminators ops, they all are printed in similar ways */
 	static llvm::StringMap<std::string> terminatorOps() {
 		return {
@@ -115,29 +131,77 @@ private:
 		};
 	};
 
+	/* type printing */
+	static std::string embedType(mlir::Type t) {
+		if (t.isa<mlir::Float32Type>()) return "Float";
+		else if (t.isa<mlir::Float64Type>()) return "Double";
+		else if (t.isa<mlir::IndexType>()) return "IxType";
+		else if (t.isa<mlir::IntegerType>()) return "Int";
+		else return "UNSUPPORTED_TYPE";
+	}
+
 	template <typename Container>
 	void printValuesInterleave(const std::string &sep, const Container &c) {
 		llvm::interleave(c, stream(), [&](mlir::Value arg) { arg.printAsOperand(stream(), OpPrintingFlags()); }, sep.c_str());
-	}
+	};
 
 	void printOperandsInterleave(const std::string sep, Operation *op) {
 		printValuesInterleave(sep, op->getOperands());
+	};
+
+	/*
+	if single value, print:
+		v0 
+	else print:
+		(v0, v1, ..., vn)
+	*/
+	template <typename Container>
+	void printValueTuple(const Container &c, size_t tupleLength) {
+		if (tupleLength != 1) stream() << "(";
+		printValuesInterleave(", ", c);
+		if (tupleLength != 1)stream() << ")";
+	}
+
+	/* results section, for operations that creates SSA values */
+	void printResults(Operation *op) {
+		unsigned nValues = op->getNumResults();
+		if (nValues == 0) return;
+		printValueTuple(op->getResults(), nValues);
+	};
+
+	/*
+	"Constant"-like case: prints the single value attribute as a return.
+
+	Requirements on ConstantLikeOp:
+	- Subclass of Operation*
+	- Should have a `::getValueAttr()` function.
+	*/
+	template <typename ConstantLikeOp>
+	void printConstantLike_(ConstantLikeOp op) {
+		// TODO: maybe also add type printing here
+		printResults(op); 
+		stream() << " <- return ";
+		op.getValueAttr().print(stream(), true);
 	}
 
   public:
-	/* Check against predefined list of ops printed in the "Standard" form. */
+	/* Check against predefined list of ops embedded in the "Standard" form. */
 	bool isStandard(llvm::StringRef opName) { return standardOps().contains(opName); };
 
-	/* predefined list of terminator ops, which have the same printing form */
-	bool isTerminator(llvm::StringRef opName) { return terminatorOps().contains(opName); };
+	/* Checks against predefined list of supported casting operations */
+	bool supportedCasting(llvm::StringRef opName) { return castingOps().contains(opName); };
+
+	/* supported terminator operations */
+	bool supportedTerminator(llvm::StringRef opName) { return terminatorOps().contains(opName); };
 
 	/* 
 	"Standard" case: prints into the form:
 		{standardOps[opName]} <operand0> <operand1> ... <operandn>
 	*/
 	void printStandard(llvm::StringRef opName, Operation *op) {
-		assert(isStandard(opName));
-		stream() << standardOps().at(opName) << " ";
+		assert(isStandard(opName) && "printStandard called on operation not within isStandard() list.");
+		printResults(op);
+		stream() << " <- " << standardOps().at(opName) << " ";
 		printOperandsInterleave(" ", op);
 	};
 
@@ -149,23 +213,50 @@ private:
 		{terminatorOps[opName]} operand0
 	*/
 	void printTerminator(llvm::StringRef opName, Operation *op) {
-		assert(isTerminator(opName));
+		assert(supportedTerminator(opName) && "printTerminator() called on unsupported operation");
 		stream() << terminatorOps().at(opName) << " ";
 
 		unsigned nOperands = op->getNumOperands(); 
-		if (nOperands == 1) {
-			op->getOperand(0).printAsOperand(stream(), OpPrintingFlags());
-		} else {
-			stream() << "(";
-			printOperandsInterleave(", ", op);
-			stream() << ")";
-		}
+		printValueTuple(op->getOperands(), nOperands);
 	};
 
-	void print(arith::AddFOp op) {
-		stream() << "add "; 
-		printOperandsInterleave(" ", op);
+	void printConstantLike(Operation *op) {
+		assert(op->hasTrait<mlir::OpTrait::ConstantLike>() && "expected operation with CosntantLike trait");
+		llvm::StringRef opName {op->getName().getStringRef()};
+		if (opName.equals("index.constant")) printConstantLike_(llvm::dyn_cast<index::ConstantOp>(op));
+		else if (opName.equals("arith.constant")) printConstantLike_(llvm::dyn_cast<arith::ConstantOp>(op));
+		else stream() << "UNSUPPORTED CONSTANT OPERATION: " << opName;
 	};
+
+	void printCasting(Operation *op) {
+		const llvm::StringRef opName = op->getName().getStringRef();
+		assert(supportedCasting(opName) && "expected a supported casting operation");
+		// check for self, ensure Op has supported form to be casted (single input & output)
+		assert(op->hasTrait<mlir::CastOpInterface::Trait>() && 
+			   op->hasTrait<mlir::OpTrait::OneResult>() && 
+			   op->hasTrait<mlir::OpTrait::OneOperand>() &&
+			   ("operation '" + opName + "' does not look like a cast. double check?").str().c_str());
+
+		printResults(op);
+		stream() << " <- return ";
+		printOperandsInterleave("", op); 
+	}
+
+	/* Special cases */
+	
+	void print(memref::AllocOp op) {
+		mlir::MemRefType memRefType = op.getType();
+
+		printResults(op); // SSA value
+		stream() << " :: MemrefType s " << embedType(memRefType.getElementType()) << " <- allocND ["; 
+		llvm::interleave( // print memref sizes
+			memRefType.getShape(), 
+			stream(), 
+			[&](int64_t arg) { stream() << arg; }, 
+			", "
+		); 
+		stream() << "]";
+	}
 
 	void print(func::FuncOp op) {
 		// TODO: add function signature
@@ -181,6 +272,7 @@ private:
 	};
 
 	void print(func::CallOp op) {
+		printResults(op);
 		stream() << op.getCallee().str() << " ";
 		printOperandsInterleave(" ", op);
 	};
