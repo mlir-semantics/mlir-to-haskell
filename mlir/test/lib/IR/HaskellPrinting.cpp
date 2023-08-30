@@ -163,11 +163,14 @@ private:
 	}
 
 	/* results section, for operations that creates SSA values */
-	void printResults(Operation *op) {
+	bool printResults(Operation *op) {
 		unsigned nValues = op->getNumResults();
-		if (nValues == 0) return;
+		if (nValues == 0) return false;
 		printValueTuple(op->getResults(), nValues);
+		return true;
 	};
+
+	void printResultsWithAssign(Operation *op) { if (printResults(op)) stream() << " <- "; };
 
 	/*
 	"Constant"-like case: prints the single value attribute as a return.
@@ -179,8 +182,8 @@ private:
 	template <typename ConstantLikeOp>
 	void printConstantLike_(ConstantLikeOp op) {
 		// TODO: maybe also add type printing here
-		printResults(op); 
-		stream() << " <- return ";
+		printResultsWithAssign(op); 
+		stream() << "return ";
 		op.getValueAttr().print(stream(), true);
 	}
 
@@ -200,8 +203,8 @@ private:
 	*/
 	void printStandard(llvm::StringRef opName, Operation *op) {
 		assert(isStandard(opName) && "printStandard called on operation not within isStandard() list.");
-		printResults(op);
-		stream() << " <- " << standardOps().at(opName) << " ";
+		printResultsWithAssign(op);
+		stream() << standardOps().at(opName) << " ";
 		printOperandsInterleave(" ", op);
 	};
 
@@ -237,8 +240,8 @@ private:
 			   op->hasTrait<mlir::OpTrait::OneOperand>() &&
 			   ("operation '" + opName + "' does not look like a cast. double check?").str().c_str());
 
-		printResults(op);
-		stream() << " <- return ";
+		printResultsWithAssign(op);
+		stream() << "return ";
 		printOperandsInterleave("", op); 
 	}
 
@@ -267,7 +270,7 @@ private:
 		printValuesInterleave(" ", firstBlock.getArguments());
 		
 		// print bit before start of region
-		stream() << "= do";
+		stream() << " = do";
 		// region will be printed in the parent call
 	};
 
