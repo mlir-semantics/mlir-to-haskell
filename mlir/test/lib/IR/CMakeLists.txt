@@ -24,6 +24,7 @@ add_mlir_library(MLIRTestIR
   TestVisitors.cpp
   TestVisitorsGeneric.cpp
   HaskellPrinting.cpp
+  ComputeDialects.cpp
 
   EXCLUDE_FROM_LIBMLIR
 

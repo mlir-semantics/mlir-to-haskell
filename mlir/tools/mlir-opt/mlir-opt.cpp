@@ -64,6 +64,7 @@ void registerTestTraitsPass();
 void registerTosaTestQuantUtilAPIPass();
 void registerVectorizerTestPass();
 void registerHaskellPrintingPass();
+void registerComputeDialectsPass();
 
 namespace test {
 void registerCommutativityUtils();
@@ -187,6 +188,7 @@ void registerTestPasses() {
   registerVectorizerTestPass();
   registerTosaTestQuantUtilAPIPass();
   registerHaskellPrintingPass();
+  registerComputeDialectsPass();
 
   mlir::test::registerCommutativityUtils();
   mlir::test::registerConvertCallOpPass();
