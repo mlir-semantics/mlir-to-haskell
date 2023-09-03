@@ -1,3 +1,5 @@
+#include <optional>
+
 // #include "llvm/IR/InstVisitor.h"
 #include "llvm/ADT/StringSet.h"
 
@@ -9,6 +11,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Index/IR/IndexOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 
 using namespace mlir;
 
@@ -16,7 +19,6 @@ namespace {
 
 typedef llvm::raw_ostream stream_t; 
 
-/// This pass illustrates the IR nesting through printing.
 struct HaskellPrintingPass
     : public PassWrapper<HaskellPrintingPass, OperationPass<>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HaskellPrintingPass)
@@ -24,16 +26,21 @@ struct HaskellPrintingPass
   StringRef getArgument() const final { return "to-haskell"; }
   StringRef getDescription() const final { return "Print into Haskell embedding."; }
 
-  /// The three methods below are mutually recursive and follow the nesting of
-  /// the IR: operation->region->block->operation->...
+  /// Methods below follow the nesting of the IR: operation->region->block->operation->...
 
   void printOperation(Operation *op) {
     // Print the operation itself and some of its properties
-	printOpLine(printIndent(), op) << "\n";
+	std::optional<std::string> suffix { printOpLine(printIndent(), op) };
+	stream() << "\n";
 
     // Recurse into each of the regions attached to the operation.
     for (Region &region : op->getRegions())
       printRegion(region);
+
+	if (suffix) {
+		printIndent() << *suffix;
+		stream() << "\n";
+	}
   }
 
   void printRegion(Region &region) {
@@ -76,7 +83,7 @@ struct HaskellPrintingPass
   }
 
 private:
-  stream_t& printOpLine(stream_t &stream, Operation *op) {
+  std::optional<std::string> printOpLine(stream_t &stream, Operation *op) {
 	// print the operation, polymorphic on operation type
 	llvm::StringRef opName {op->getName().getStringRef()};
 
@@ -85,25 +92,29 @@ private:
 	else if (hp.supportedCasting(opName)) hp.printCasting(op);
 	else if (op->hasTrait<mlir::OpTrait::IsTerminator>()) hp.printTerminator(opName, op);
 	else if (op->hasTrait<mlir::OpTrait::ConstantLike>()) hp.printConstantLike(op);
-	else if (opName.equals("func.func")) hp.print(llvm::dyn_cast<func::FuncOp>(op));
-	else if (opName.equals("func.call")) hp.print(llvm::dyn_cast<func::CallOp>(op));
-	else if (opName.equals("memref.alloc")) hp.print(llvm::dyn_cast<memref::AllocOp>(op));
-	else if (opName.equals("memref.load")) hp.print(llvm::dyn_cast<memref::LoadOp>(op));
-	else if (opName.equals("memref.store")) hp.print(llvm::dyn_cast<memref::StoreOp>(op));
+	else if (opName.equals("func.func")) hp.print(llvm::dyn_cast<func::FuncOp>(op)); // creates function SSA value
+	else if (opName.equals("func.call")) hp.print(llvm::dyn_cast<func::CallOp>(op)); // uses function SSA value
+	else if (opName.equals("scf.for")) hp.print(llvm::dyn_cast<scf::ForOp>(op)); // variable binding
+	else if (opName.equals("memref.alloc")) hp.print(llvm::dyn_cast<memref::AllocOp>(op)); // dependent return type
+	else if (opName.equals("memref.load")) hp.print(llvm::dyn_cast<memref::LoadOp>(op)); // variadic operands
+	else if (opName.equals("memref.store")) hp.print(llvm::dyn_cast<memref::StoreOp>(op)); // variadic operands
 	else stream << "UNIMPLEMENTED " << op->getName();
 
-	return stream;
+	return hp.getSuffix();
   }
 
-  struct HaskellOpPrinter {
+  class HaskellOpPrinter {
   public:
-	HaskellOpPrinter(stream_t &stream) : pStream{&stream} {}; 
+	HaskellOpPrinter(stream_t &stream) : pStream{&stream}, suffix() {}; 
 
   private:
 	stream_t *pStream;
 
 	/* access stream by reference */
 	stream_t &stream() { return *pStream; }; 
+
+	std::optional<std::string> suffix;
+	void setSuffix(std::string newSuffix) { suffix = newSuffix; };
 
 	/* operations to be printed in the "Standard" form */
 	static llvm::StringMap<std::string> standardOps() {
@@ -148,6 +159,10 @@ private:
 
 	void printValue(mlir::Value arg) { arg.printAsOperand(stream(), OpPrintingFlags()); };
 
+	/*
+	Container should be an instance of:
+		indexed_accessor_range_base<>
+	*/
 	template <typename Container>
 	void printValuesInterleave(const std::string &sep, const Container &c) {
 		llvm::interleave(c, stream(), [&](mlir::Value arg) { printValue(arg); }, sep.c_str());
@@ -165,14 +180,17 @@ private:
 	void printOperands(Operation *op, const std::string sep = " ") { printValues(op->getOperands(), sep); };
 
 	/*
+	Container should be an instance of:
+		indexed_accessor_range_base<>
+
 	if single value, print:
 		v0 
 	else print:
 		(v0, v1, ..., vn)
 	*/
 	template <typename Container>
-	void printValueTuple(const Container &c, size_t tupleLength) {
-		if (tupleLength == 1) printValues(c, "");
+	void printValueTuple(const Container &c) {
+		if (c.size() == 1) printValues(c, "");
 		else printValues(c, ", ", "(", ")");
 	};
 
@@ -189,7 +207,7 @@ private:
 	*/
 	template <typename MemRefIndexingOp>
 	void printMemRefIndexingOp(MemRefIndexingOp op, const std::string opName) {
-		if (printResults(op)) stream() << " <- ";
+		printResultsWithAssign(op);
 		stream() << opName << " ";
 		printValue(op.getMemref());
 		stream() << " ";
@@ -203,7 +221,7 @@ private:
 	bool printResults(Operation *op) {
 		unsigned nValues = op->getNumResults();
 		if (nValues == 0) return false;
-		printValueTuple(op->getResults(), nValues);
+		printValueTuple(op->getResults());
 		return true;
 	};
 
@@ -225,6 +243,9 @@ private:
 	}
 
   public:
+	/* if the operation printed needs a suffix printed too */
+	std::optional<std::string> getSuffix() { return suffix; };
+
 	/* Check against predefined list of ops embedded in the "Standard" form. */
 	bool isStandard(llvm::StringRef opName) { return standardOps().contains(opName); };
 
@@ -255,9 +276,7 @@ private:
 	void printTerminator(llvm::StringRef opName, Operation *op) {
 		assert(supportedTerminator(opName) && "printTerminator() called on unsupported operation");
 		stream() << terminatorOps().at(opName) << " ";
-
-		unsigned nOperands = op->getNumOperands(); 
-		printValueTuple(op->getOperands(), nOperands);
+		printValueTuple(op->getOperands());
 	};
 
 	void printConstantLike(Operation *op) {
@@ -301,6 +320,25 @@ private:
 	void print(memref::LoadOp op) {	printMemRefIndexingOp(op, "load"); };
 
 	void print(memref::StoreOp op) { printMemRefIndexingOp(op, "store"); };
+
+	void print(scf::ForOp op) {
+		printResultsWithAssign(op);
+		stream() << "for ";
+		printValue(op.getLowerBound());
+		stream() << " ";
+		printValue(op.getUpperBound());
+		stream() << " ";
+		printValue(op.getStep());
+		stream() << " ";
+		printValues(op.getInitArgs(), " ", "(", ")");
+		stream() << " (\\";
+		printValue(op.getInductionVar());
+		stream() << " ";
+		printValueTuple(op.getRegionIterArgs());
+		stream() << " -> do";
+
+		setSuffix(")");
+	}
 
 	void print(func::FuncOp op) {
 		// TODO: add function signature
