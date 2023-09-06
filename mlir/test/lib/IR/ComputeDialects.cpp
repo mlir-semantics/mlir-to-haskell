@@ -26,6 +26,8 @@ struct ComputeDialectsPass
   StringRef getDescription() const final { return "Computes the dialect used within each region, and save these as attributes."; }
 
   void visitOperation(std::optional<func::FuncOp> parentFuncOp, Operation *op) {
+    // TODO next: make computeDialects more generic for functions
+
     // will add all "seen" dialects to the FuncOp's (parentFuncOp) attributes 
     // visit regions and blocks as usual, passing in the variable
     // if sees another FuncOp, though, 

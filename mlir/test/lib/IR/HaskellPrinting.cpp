@@ -22,10 +22,16 @@ const std::string DIALECT_ATTR = "__hask.dialects";
 
 typedef llvm::raw_ostream stream_t; 
 
-stream_t &printIndent(stream_t &stream, int indent) {
+static stream_t &printIndent(stream_t &stream, int indent) {
 	for (int i = 0; i < indent; ++i)
 		stream << "    ";
 	return stream;
+}
+
+static std::string capitalise(const std::string &word) {
+	std::string newWord { word };
+	newWord.front() = std::toupper(newWord.front());
+	return { newWord };
 }
 
 struct HaskellPrintingPass
@@ -105,7 +111,8 @@ private:
 	else if (hp.supportedCasting(opName)) hp.printCasting(op);
 	else if (op->hasTrait<mlir::OpTrait::IsTerminator>()) hp.printTerminator(opName, op);
 	else if (op->hasTrait<mlir::OpTrait::ConstantLike>()) hp.printConstantLike(op);
-	else if (opName.equals("func.func")) hp.print(llvm::dyn_cast<func::FuncOp>(op)); // creates function SSA value
+	else if (opName.equals("builtin.module")) hp.print(llvm::dyn_cast<ModuleOp>(op)); // not an effect in Haskell 
+	else if (opName.equals("func.func")) hp.print(llvm::dyn_cast<func::FuncOp>(op)); // creates function SSA value, but not SSA in haskell
 	else if (opName.equals("func.call")) hp.print(llvm::dyn_cast<func::CallOp>(op)); // uses function SSA value
 	else if (opName.equals("scf.for")) hp.print(llvm::dyn_cast<scf::ForOp>(op)); // variable binding
 	else if (opName.equals("memref.alloc")) hp.print(llvm::dyn_cast<memref::AllocOp>(op)); // dependent return type
@@ -175,10 +182,8 @@ private:
 		if (dialect.str().empty()) 
 			return std::nullopt;
 		
-		// default printing method: capitalize first letter
-		std::string dialectStr { dialect.str() };
-		dialectStr.front() = std::toupper(dialectStr.front());
-		return { dialectStr };
+		// default printing method: capitalise first letter
+		return { capitalise(dialect.str()) };
 	};
 
 	/* type printing */
@@ -335,6 +340,17 @@ private:
 	};
 
 	/* Special cases */
+
+	void print(ModuleOp op) {
+		assert(op->hasAttrOfType<ArrayAttr>(DIALECT_ATTR));
+		
+		stream() << "module Main where\n" 
+				 << "import Polysemy\n";
+
+		auto dialects = op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>();
+		for (const auto& dialect : dialects) 
+			stream() << "import " << capitalise(dialect.str()) << "\n";
+	}
 	
 	void print(memref::AllocOp op) {
 		mlir::MemRefType memRefType = op.getType();
@@ -375,8 +391,8 @@ private:
 
 	void print(func::FuncOp op) {		
 		// signature, typeclass
-		stream() << op.getSymName().str() << " :: ";
 		assert(op->hasAttrOfType<ArrayAttr>(DIALECT_ATTR));
+		stream() << op.getSymName().str() << " :: ";
 		auto dialects = op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>();
 		std::vector<std::string> dialectEmbedding;
 		for (const auto& dialect : dialects) {
@@ -395,9 +411,6 @@ private:
 				   }) 
 				<< "] r) => ";
 		}
-
-		// TODO next: make computeDialects assign dialects to builtin.module so we know what to import
-		// TODO next: make computeDialects more generic for functions
 
 		// signature, inputs
 		FunctionType fnType { op.getFunctionType() };
@@ -433,6 +446,7 @@ private:
 	};
   };
 };
+
 } // namespace
 
 namespace mlir {
