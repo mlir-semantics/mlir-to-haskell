@@ -1,4 +1,5 @@
 #include <optional>
+#include <numeric>
 
 // #include "llvm/IR/InstVisitor.h"
 #include "llvm/ADT/StringSet.h"
@@ -16,6 +17,8 @@
 using namespace mlir;
 
 namespace {
+
+const std::string DIALECT_ATTR = "__hask_dialects";
 
 typedef llvm::raw_ostream stream_t; 
 
@@ -154,11 +157,22 @@ private:
 		};
 	};
 
-	/* specify custom printing for certain dialects */
-	static llvm::StringMap<std::string> specialDialects() {
-		return {
-			{"memref", "Memref s"}
+	/* dialects printing */
+	static std::optional<std::string> embedDialect(const StringAttr &dialect) {
+		llvm::StringMap<std::optional<std::string>> specialDialects = {
+			{"memref", "Memref s"},
+			{"func", std::nullopt},
+			{"index", std::nullopt} // nullopt for now as is only type. in future effects will be added to index embedding 
 		};
+		if (specialDialects.contains(dialect.str())) 
+			return specialDialects.at(dialect.str());
+		if (dialect.str().empty()) 
+			return std::nullopt;
+		
+		// default printing method: capitalize first letter
+		std::string dialectStr { dialect.str() };
+		dialectStr.front() = std::toupper(dialectStr.front());
+		return { dialectStr };
 	};
 
 	/* type printing */
@@ -354,8 +368,32 @@ private:
 	}
 
 	void print(func::FuncOp op) {
-		// signature, typeclass
+		// signature
 		stream() << op.getSymName().str() << " :: "; // << inputTypes interleave -> << outputType << "\n";
+		
+		// signature, typeclass
+		assert(op->hasAttrOfType<ArrayAttr>(DIALECT_ATTR));
+		auto dialects = op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>();
+		std::vector<std::string> dialectEmbedding;
+		for (const auto& dialect : dialects) {
+			std::optional<std::string> embedded { embedDialect(dialect) };
+			if (embedded) dialectEmbedding.push_back(*embedded);
+		}
+		if (!dialectEmbedding.empty()) {
+			stream() 
+				<< "(Members '["
+				<< std::accumulate(
+					std::next(dialectEmbedding.begin()), 
+					dialectEmbedding.end(), 
+					dialectEmbedding[0], 
+					[](std::string a, std::string b) {
+						return a + ", " + b;
+				   }) 
+				<< "] r) => ";
+		}
+
+		// TODO next: make computeDialects assign dialects to builtin.module so we know what to import
+		// TODO next: make computeDialects more generic for functions
 
 		// signature, inputs
 		FunctionType fnType { op.getFunctionType() };
