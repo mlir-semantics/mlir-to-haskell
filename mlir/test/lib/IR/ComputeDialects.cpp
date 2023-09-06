@@ -16,7 +16,7 @@ namespace {
 
 typedef std::string DialectName;
 typedef std::set<std::string> DialectsSet;
-static std::string DIALECT_ATTR = "__hask_dialects";
+static std::string DIALECT_ATTR = "__hask.dialects";
 
 struct ComputeDialectsPass
     : public PassWrapper<ComputeDialectsPass, OperationPass<>> {
@@ -60,25 +60,30 @@ struct ComputeDialectsPass
 
   // Entry point for the pass.
   void runOnOperation() override {
-    Operation *op = getOperation();
-    visitOperation(std::nullopt, op);
+    Operation *entryOp = getOperation();
+    visitOperation(std::nullopt, entryOp);
 
+    // add dialects as attributes to all operations, and add to top-level op set
     for (auto it = dialectsOf.begin(); it != dialectsOf.end(); ++it) {
-      func::FuncOp funcOp = it->first;
+      Operation *tOp = it->first;
       const DialectsSet& dialects { it->second };
-      loadDialectsAsAttrs(funcOp, dialects);
+      loadDialectsAsAttrs(tOp, dialects);
+
+      addDialects(entryOp, dialects);
     }
+
+    loadDialectsAsAttrs(entryOp, dialectsOf[entryOp]);
   }
 
 private:
-  std::map<func::FuncOp, DialectsSet> dialectsOf;
+  std::map<Operation*, DialectsSet> dialectsOf;
 
-  void addDialect(std::optional<func::FuncOp> op, DialectName dialectName) {
+  void addDialect(const std::optional<Operation*> op, const DialectName &dialectName) {
     if (!op) return;
     dialectsOf[*op].insert(dialectName);
   }
 
-  void addDialects(std::optional<func::FuncOp> op, const DialectsSet& dialects) {
+  void addDialects(const std::optional<Operation*> op, const DialectsSet &dialects) {
     if (!op) return;
 
     DialectsSet& opDialects { dialectsOf[*op] };
@@ -86,9 +91,9 @@ private:
       opDialects.insert(d);
   }
 
-  void loadDialectsAsAttrs(func::FuncOp op, const DialectsSet& dialects) {
+  void loadDialectsAsAttrs(Operation *op, const DialectsSet& dialects, const std::string& attrKey = DIALECT_ATTR) {
     // create dictionary entry if not present
-    assert(!op->hasAttr(DIALECT_ATTR));
+    assert(!op->hasAttr(attrKey));
 
     // construct the dialects dictionary
     std::vector<Attribute> dialectsAttrs;
@@ -97,7 +102,7 @@ private:
 
     // set the attributes of the operation
     op->setDiscardableAttr(
-      getStringAttr(op, DIALECT_ATTR), 
+      getStringAttr(op, attrKey), 
       ArrayAttr::get(op->getContext(), llvm::ArrayRef<Attribute>(dialectsAttrs))
     );
   }

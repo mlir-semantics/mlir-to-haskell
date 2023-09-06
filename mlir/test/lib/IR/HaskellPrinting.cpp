@@ -18,7 +18,7 @@ using namespace mlir;
 
 namespace {
 
-const std::string DIALECT_ATTR = "__hask_dialects";
+const std::string DIALECT_ATTR = "__hask.dialects";
 
 typedef llvm::raw_ostream stream_t; 
 
@@ -41,10 +41,17 @@ struct HaskellPrintingPass
     // Print the operation itself and some of its properties
 	std::optional<std::string> suffix { printOpLine(printIndent(stream(), indent), op) };
 	stream() << "\n";
-
-    // Recurse into each of the regions attached to the operation.
-    for (Region &region : op->getRegions())
-      printRegion(region);
+	
+	// Recurse through all regions
+	// But don't add indent if current op is builtin.module.
+	if (llvm::isa<ModuleOp>(op)) {
+		for (Region &region : op->getRegions()) 
+			printRegion(region);
+	} else {
+		auto indent = pushIndent();
+    	for (Region &region : op->getRegions()) 
+			printRegion(region);
+	}
 
 	if (suffix) {
 		printIndent(stream(), indent) << *suffix;
@@ -54,7 +61,6 @@ struct HaskellPrintingPass
 
   void printRegion(Region &region) {
     // A region does not hold anything by itself other than a list of blocks.
-	auto indent = pushIndent();
     for (Block &block : region.getBlocks())
       printBlock(block);
   }
@@ -367,11 +373,9 @@ private:
 		setSuffix(")");
 	}
 
-	void print(func::FuncOp op) {
-		// signature
-		stream() << op.getSymName().str() << " :: "; // << inputTypes interleave -> << outputType << "\n";
-		
+	void print(func::FuncOp op) {		
 		// signature, typeclass
+		stream() << op.getSymName().str() << " :: ";
 		assert(op->hasAttrOfType<ArrayAttr>(DIALECT_ATTR));
 		auto dialects = op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>();
 		std::vector<std::string> dialectEmbedding;
