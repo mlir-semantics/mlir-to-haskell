@@ -19,6 +19,12 @@ namespace {
 
 typedef llvm::raw_ostream stream_t; 
 
+stream_t &printIndent(stream_t &stream, int indent) {
+	for (int i = 0; i < indent; ++i)
+		stream << "    ";
+	return stream;
+}
+
 struct HaskellPrintingPass
     : public PassWrapper<HaskellPrintingPass, OperationPass<>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HaskellPrintingPass)
@@ -30,7 +36,7 @@ struct HaskellPrintingPass
 
   void printOperation(Operation *op) {
     // Print the operation itself and some of its properties
-	std::optional<std::string> suffix { printOpLine(printIndent(), op) };
+	std::optional<std::string> suffix { printOpLine(printIndent(stream(), indent), op) };
 	stream() << "\n";
 
     // Recurse into each of the regions attached to the operation.
@@ -38,7 +44,7 @@ struct HaskellPrintingPass
       printRegion(region);
 
 	if (suffix) {
-		printIndent() << *suffix;
+		printIndent(stream(), indent) << *suffix;
 		stream() << "\n";
 	}
   }
@@ -69,17 +75,15 @@ struct HaskellPrintingPass
   void resetIndent() { indent = 0; }
   IdentRAII pushIndent() { return IdentRAII(++indent); }
 
-  stream_t &printIndent() {
-    for (int i = 0; i < indent; ++i)
-      stream() << "    ";
-    return stream();
-  }
-
   // Entry point for the pass.
   void runOnOperation() override {
+	stream() << "---- START OF HASKELL ----\n";
+
     Operation *op = getOperation();
     resetIndent();
     printOperation(op);
+
+	stream() << "---- END OF HASKELL ----\n";
   }
 
 private:
@@ -87,7 +91,7 @@ private:
 	// print the operation, polymorphic on operation type
 	llvm::StringRef opName {op->getName().getStringRef()};
 
-	HaskellOpPrinter hp{stream};
+	HaskellOpPrinter hp(stream, indent);
 	if (hp.isStandard(opName)) hp.printStandard(opName, op);
 	else if (hp.supportedCasting(opName)) hp.printCasting(op);
 	else if (op->hasTrait<mlir::OpTrait::IsTerminator>()) hp.printTerminator(opName, op);
@@ -105,7 +109,7 @@ private:
 
   class HaskellOpPrinter {
   public:
-	HaskellOpPrinter(stream_t &stream) : pStream{&stream}, suffix() {}; 
+	HaskellOpPrinter(stream_t &stream, int indent) : pStream{&stream}, suffix(), indent{indent} {}; 
 
   private:
 	stream_t *pStream;
@@ -115,6 +119,8 @@ private:
 
 	std::optional<std::string> suffix;
 	void setSuffix(std::string newSuffix) { suffix = newSuffix; };
+
+	int indent;
 
 	/* operations to be printed in the "Standard" form */
 	static llvm::StringMap<std::string> standardOps() {
@@ -148,8 +154,15 @@ private:
 		};
 	};
 
+	/* specify custom printing for certain dialects */
+	static llvm::StringMap<std::string> specialDialects() {
+		return {
+			{"memref", "Memref s"}
+		};
+	};
+
 	/* type printing */
-	static std::string embedType(mlir::Type t) {
+	static std::string embedType(const mlir::Type t) {
 		if (t.isa<mlir::Float32Type>()) return "Float";
 		else if (t.isa<mlir::Float64Type>()) return "Double";
 		else if (t.isa<mlir::IndexType>()) return "IxType";
@@ -341,8 +354,26 @@ private:
 	}
 
 	void print(func::FuncOp op) {
-		// TODO: add function signature
-		stream() << op.getSymName().str() << " ";
+		// signature, typeclass
+		stream() << op.getSymName().str() << " :: "; // << inputTypes interleave -> << outputType << "\n";
+
+		// signature, inputs
+		FunctionType fnType { op.getFunctionType() };
+		for (const auto& type : fnType.getInputs())
+			stream() << embedType(type) << " -> ";
+
+		// signature, outputs (as tuple):
+		llvm::ArrayRef<Type> outputs { fnType.getResults() };
+		stream() << "Sem r (";
+		if (!outputs.empty()) {
+			for (auto it = outputs.begin(); it < outputs.end() - 1; ++it)
+				stream() << embedType(*it) << ", ";
+			stream() << embedType(*(outputs.end() - 1));
+		}
+		stream() << ")\n";
+
+		// function definition
+		printIndent(stream(), indent) << op.getSymName().str() << " ";
 
 		// print arg names, which are arguments to the first block in the attached region
 		Block& firstBlock { op.getRegion().front() };
