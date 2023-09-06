@@ -1,4 +1,5 @@
 #include <optional>
+#include <set>
 
 // #include "llvm/IR/InstVisitor.h"
 #include "llvm/ADT/StringSet.h"
@@ -13,7 +14,8 @@ using namespace mlir;
 
 namespace {
 
-typedef llvm::raw_ostream stream_t; 
+typedef std::string DialectName;
+typedef std::set<std::string> DialectsSet;
 static std::string DIALECT_ATTR = "__hask_dialects";
 
 struct ComputeDialectsPass
@@ -29,7 +31,7 @@ struct ComputeDialectsPass
     // if sees another FuncOp, though, 
     //  update the parameter to the funcOp seen, 
     //  then also add everything into the parent after regions are done 
-    addDialect(parentFuncOp, op->getDialect()->getNamespace());
+    addDialect(parentFuncOp, op->getDialect()->getNamespace().str());
 
     // function: this guy needs dialect attributes saved
     std::optional<func::FuncOp> newParentFuncOp = parentFuncOp;
@@ -41,9 +43,8 @@ struct ComputeDialectsPass
       visitRegion(newParentFuncOp, region);
 
     if (llvm::isa<func::FuncOp>(op)) {
-      // assert newParentFuncOp and parentFuncOp is not equivalent
-      // assert existence of attribute on parent op
-      // addDialects(parentFuncOp, (*newParentFuncOp)->getDiscardableAttr(DIALECT_ATTR));
+      assert(newParentFuncOp != parentFuncOp);
+      addDialects(parentFuncOp, dialectsOf[*newParentFuncOp]);
     }
   }
 
@@ -61,28 +62,70 @@ struct ComputeDialectsPass
   void runOnOperation() override {
     Operation *op = getOperation();
     visitOperation(std::nullopt, op);
-  }
 
-private:
-  void addDialect(std::optional<func::FuncOp> op, llvm::StringRef dialectName) {
-    if (!op) return;
+    for (auto it = dialectsOf.begin(); it != dialectsOf.end(); ++it) {
+      func::FuncOp funcOp = it->first;
+      const DialectsSet& dialects { it->second };
 
-    // adds dialectName to the op's attributes
-    if (!(*op)->hasAttr(DIALECT_ATTR)) {
-      (*op)->setDiscardableAttr(
-        StringAttr(DIALECT_ATTR), 
-        DictionaryAttr::getWithSorted(op->getContext(), llvm::ArrayRef<NamedAttribute>())
-      );
+      llvm::outs() << funcOp.getSymName() << " has dialects: {";
+      for (const auto& d : dialects)
+        llvm::outs() << d << ", ";
+      llvm::outs() << "}\n";
+
+      loadDialectsAsAttrs(funcOp, dialects);
+    }
+
+    for (auto it = dialectAttrsOf.begin(); it != dialectAttrsOf.end(); ++it) {
+      func::FuncOp funcOp = it->first;
+      const ArrayAttr& attr { it->second };
+
+      llvm::outs() << funcOp.getSymName() << " has attribute: " << attr;
     }
   }
 
-  void addDialects(std::optional<func::FuncOp> op, Attribute _attr) {
-    assert(_attr && _attr.isa<DictionaryAttr>());
+private:
+  std::map<func::FuncOp, DialectsSet> dialectsOf;
+  std::map<func::FuncOp, ArrayAttr> dialectAttrsOf;
+
+  void addDialect(std::optional<func::FuncOp> op, DialectName dialectName) {
     if (!op) return;
-    auto attr = _attr.dyn_cast<DictionaryAttr>();
+    dialectsOf[*op].insert(dialectName);
+  }
 
-    // adds dialects (stored in attr) to op.
+  void addDialects(std::optional<func::FuncOp> op, const DialectsSet& dialects) {
+    if (!op) return;
 
+    DialectsSet& opDialects { dialectsOf[*op] };
+    for (const auto& d : dialects)
+      opDialects.insert(d);
+  }
+
+  void loadDialectsAsAttrs(func::FuncOp op, const DialectsSet& dialects) {
+    // create dictionary entry if not present
+    assert(!op->hasAttr(DIALECT_ATTR));
+
+    // construct the dialects dictionary
+    std::vector<Attribute> dialectsAttrs(dialects.size());
+    for (const DialectName& d : dialects)
+      dialectsAttrs.push_back(getStringAttr(op, d));
+
+    auto testArrayAttr = ArrayAttr::get(op->getContext(), llvm::ArrayRef<Attribute>(dialectsAttrs));
+    dialectAttrsOf[op] = testArrayAttr;
+
+    // set the attributes of the operation
+    // op->setDiscardableAttr(
+    op->setAttr(
+      DIALECT_ATTR, 
+      // getStringAttr(op, "foofoo")
+      // CLUE: looks like this line below: v causes problem, but the line ^ doesn't.
+      testArrayAttr
+      // problem caused is a nullptr error, are things being cleared? maybe ArrayAttr just points to an ArrayRef rather than copying it
+      // CLUE: WEIRD! STUFF GETS PRINTED OUT AS NULL.
+    );
+  }
+
+  static StringAttr getStringAttr(Operation *op, const std::string& s) {
+    return StringAttr::get(op->getContext(), llvm::Twine(s));
   }
 };
 } // namespace
