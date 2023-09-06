@@ -66,26 +66,12 @@ struct ComputeDialectsPass
     for (auto it = dialectsOf.begin(); it != dialectsOf.end(); ++it) {
       func::FuncOp funcOp = it->first;
       const DialectsSet& dialects { it->second };
-
-      llvm::outs() << funcOp.getSymName() << " has dialects: {";
-      for (const auto& d : dialects)
-        llvm::outs() << d << ", ";
-      llvm::outs() << "}\n";
-
       loadDialectsAsAttrs(funcOp, dialects);
-    }
-
-    for (auto it = dialectAttrsOf.begin(); it != dialectAttrsOf.end(); ++it) {
-      func::FuncOp funcOp = it->first;
-      const ArrayAttr& attr { it->second };
-
-      llvm::outs() << funcOp.getSymName() << " has attribute: " << attr;
     }
   }
 
 private:
   std::map<func::FuncOp, DialectsSet> dialectsOf;
-  std::map<func::FuncOp, ArrayAttr> dialectAttrsOf;
 
   void addDialect(std::optional<func::FuncOp> op, DialectName dialectName) {
     if (!op) return;
@@ -105,22 +91,14 @@ private:
     assert(!op->hasAttr(DIALECT_ATTR));
 
     // construct the dialects dictionary
-    std::vector<Attribute> dialectsAttrs(dialects.size());
+    std::vector<Attribute> dialectsAttrs;
     for (const DialectName& d : dialects)
       dialectsAttrs.push_back(getStringAttr(op, d));
 
-    auto testArrayAttr = ArrayAttr::get(op->getContext(), llvm::ArrayRef<Attribute>(dialectsAttrs));
-    dialectAttrsOf[op] = testArrayAttr;
-
     // set the attributes of the operation
-    // op->setDiscardableAttr(
-    op->setAttr(
-      DIALECT_ATTR, 
-      // getStringAttr(op, "foofoo")
-      // CLUE: looks like this line below: v causes problem, but the line ^ doesn't.
-      testArrayAttr
-      // problem caused is a nullptr error, are things being cleared? maybe ArrayAttr just points to an ArrayRef rather than copying it
-      // CLUE: WEIRD! STUFF GETS PRINTED OUT AS NULL.
+    op->setDiscardableAttr(
+      getStringAttr(op, DIALECT_ATTR), 
+      ArrayAttr::get(op->getContext(), llvm::ArrayRef<Attribute>(dialectsAttrs))
     );
   }
 
