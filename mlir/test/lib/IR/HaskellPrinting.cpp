@@ -143,6 +143,9 @@ private:
 
 	int indent;
 
+	/* suffix for MLIR functions (to distinguish from Haskell namespace) */
+	static inline std::string functionNameSuffix = "_mlir";   
+
 	/* operations to be printed in the "Standard" form */
 	static llvm::StringMap<std::string> standardOps() {
 		return {
@@ -431,7 +434,7 @@ private:
 	void print(func::FuncOp op) {		
 		// signature, typeclass
 		assert(op->hasAttrOfType<ArrayAttr>(DIALECT_ATTR));
-		stream() << op.getSymName().str() << " :: ";
+		stream() << op.getSymName().str() << functionNameSuffix << " :: ";
 		auto dialects = op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>();
 		std::vector<std::string> dialectEmbedding;
 		for (const auto& dialect : dialects) {
@@ -467,7 +470,7 @@ private:
 		stream() << ")\n";
 
 		// function definition
-		printIndent(stream(), indent) << op.getSymName().str() << " ";
+		printIndent(stream(), indent) << op.getSymName().str() << functionNameSuffix << " ";
 
 		// print arg names, which are arguments to the first block in the attached region
 		Block& firstBlock { op.getRegion().front() };
@@ -480,7 +483,7 @@ private:
 
 	void print(func::CallOp op) {
 		printResults(op);
-		stream() << op.getCallee().str() << " ";
+		stream() << op.getCallee().str() << functionNameSuffix << " ";
 		printOperands(op);
 	};
   };
