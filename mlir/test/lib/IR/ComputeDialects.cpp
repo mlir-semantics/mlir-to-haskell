@@ -48,6 +48,8 @@ struct ComputeDialectsPass
       assert(newParentFuncOp != parentFuncOp);
       addDialects(parentFuncOp, dialectsOf[*newParentFuncOp]);
     }
+
+    // also needs dialect added if calling the function!
   }
 
   void visitRegion(std::optional<func::FuncOp> parentFuncOp, Region &region) {

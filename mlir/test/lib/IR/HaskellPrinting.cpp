@@ -1,5 +1,6 @@
 #include <optional>
 #include <numeric>
+#include <set>
 
 // #include "llvm/IR/InstVisitor.h"
 #include "llvm/ADT/StringSet.h"
@@ -18,13 +19,14 @@ using namespace mlir;
 
 namespace {
 
-const std::string DIALECT_ATTR = "__hask.dialects";
+static const std::string DIALECT_ATTR = "__hask.dialects";
+static const std::string TAB = "    ";
 
 typedef llvm::raw_ostream stream_t; 
 
 static stream_t &printIndent(stream_t &stream, int indent) {
 	for (int i = 0; i < indent; ++i)
-		stream << "    ";
+		stream << TAB;
 	return stream;
 }
 
@@ -51,13 +53,16 @@ struct HaskellPrintingPass
 	// Recurse through all regions
 	// But don't add indent if current op is builtin.module.
 	if (llvm::isa<ModuleOp>(op)) {
-		for (Region &region : op->getRegions()) 
-			printRegion(region);
+		printRegions(op, suffix);
 	} else {
 		auto indent = pushIndent();
-    	for (Region &region : op->getRegions()) 
-			printRegion(region);
+    	printRegions(op, suffix);
 	}
+  }
+
+  void printRegions(Operation *op, const std::optional<std::string> &suffix) {
+	for (Region &region : op->getRegions()) 
+		printRegion(region);
 
 	if (suffix) {
 		printIndent(stream(), indent) << *suffix;
@@ -149,7 +154,8 @@ private:
 			{"arith.uitofp", "intToFp"},
 			{"index.sub", "sub"},
 			{"memref.dim", "dim"},
-			{"memref.dealloc", "deallocMemref"}
+			{"memref.dealloc", "deallocMemref"},
+			{"vector.print", "print"}
 		};
 	};
 
@@ -165,8 +171,8 @@ private:
 	static llvm::StringMap<std::string> terminatorOps() {
 		return {
 			{"func.return", "return"},
-			{"scf.yield", "scfYield"},
-			{"affine.yield", "affineYield"}
+			{"scf.yield", "scfYieldOp"},
+			{"affine.yield", "affineYieldOp"}
 		};
 	};
 
@@ -196,6 +202,14 @@ private:
 	}
 
 	void printValue(mlir::Value arg) { arg.printAsOperand(stream(), OpPrintingFlags()); };
+
+	/* Some dialects interpret into lower level dialects and these need to be imported also */
+	static std::map<std::string, std::set<std::string>> relatedImports() {
+		return {
+			{"Scf", {"ControlFlow"}},
+			{"Memref", {"Mutable", "Control.Monad.ST"}}
+		};
+	}
 
 	/*
 	Container should be an instance of:
@@ -238,15 +252,20 @@ private:
 	/*
 	print operation out in the form:
 		[(return_vals) <-] <op_name> memref_val[i0, i1, ..., in] 
+	where valueToStore is non-empty for operations storing values to memory
 
 	MemRefIndexingOp must have the following functions:
 		- getMemref()
 		- getIndices()
 	*/
 	template <typename MemRefIndexingOp>
-	void printMemRefIndexingOp(MemRefIndexingOp op, const std::string opName) {
+	void printMemRefIndexingOp(MemRefIndexingOp op, const std::string opName, std::optional<Value> valueToStore = std::nullopt) {
 		printResultsWithAssign(op);
 		stream() << opName << " ";
+		if (valueToStore) { 
+			printValue(*valueToStore);
+			stream() << " ";
+		}
 		printValue(op.getMemref());
 		stream() << " ";
 		printIndices(op.getIndices());
@@ -300,7 +319,7 @@ private:
 	void printStandard(llvm::StringRef opName, Operation *op) {
 		assert(isStandard(opName) && "printStandard called on operation not within isStandard() list.");
 		printResultsWithAssign(op);
-		stream() << standardOps().at(opName) << " ";
+		stream() << /* capitalise(opName.str()) */ standardOps().at(opName) << " ";
 		printOperands(op);
 	};
 
@@ -344,12 +363,17 @@ private:
 	void print(ModuleOp op) {
 		assert(op->hasAttrOfType<ArrayAttr>(DIALECT_ATTR));
 		
-		stream() << "module Main where\n" 
+		stream() << "{-# LANGUAGE TemplateHaskell, LambdaCase, BlockArguments, GADTs, \n"
+				 << "FlexibleContexts, TypeOperators, DataKinds, PolyKinds, ScopedTypeVariables #-}\n\n"
+				 << "module Main where\n" 
+				 << "import Data.Function\n"
 				 << "import Polysemy\n";
 
 		auto dialects = op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>();
-		for (const auto& dialect : dialects) 
+		for (const auto& dialect : dialects) {
 			stream() << "import " << capitalise(dialect.str()) << "\n";
+
+		}
 	}
 	
 	void print(memref::AllocOp op) {
@@ -368,7 +392,7 @@ private:
 
 	void print(memref::LoadOp op) {	printMemRefIndexingOp(op, "load"); };
 
-	void print(memref::StoreOp op) { printMemRefIndexingOp(op, "store"); };
+	void print(memref::StoreOp op) { printMemRefIndexingOp(op, "store", op.getValueToStore()); };
 
 	void print(scf::ForOp op) {
 		printResultsWithAssign(op);
