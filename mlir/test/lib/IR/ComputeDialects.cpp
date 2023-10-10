@@ -16,6 +16,7 @@ namespace {
 
 typedef std::string DialectName;
 typedef std::set<std::string> DialectsSet;
+typedef std::set<std::string> Callees;
 static std::string DIALECT_ATTR = "__hask.dialects";
 
 struct ComputeDialectsPass
@@ -41,15 +42,22 @@ struct ComputeDialectsPass
       newParentFuncOp = funcOp;
     }
 
+    // visit each region, adding dialects to current op's attributes
     for (Region &region : op->getRegions())
       visitRegion(newParentFuncOp, region);
 
+    // now we know what dialects are used in the function, add it to the parent too
     if (llvm::isa<func::FuncOp>(op)) {
       assert(newParentFuncOp != parentFuncOp);
       addDialects(parentFuncOp, dialectsOf[*newParentFuncOp]);
     }
 
-    // also needs dialect added if calling the function!
+    // if we call a function, then all the callee's dialects need to be added too.
+    // we record the callee relationship for now
+    if (parentFuncOp && llvm::isa<func::CallOp>(op)) {
+      auto callOp = llvm::dyn_cast<func::CallOp>(op);
+      calleesOf[*parentFuncOp].insert(callOp.getCallee().str());
+    }
   }
 
   void visitRegion(std::optional<func::FuncOp> parentFuncOp, Region &region) {
@@ -65,7 +73,11 @@ struct ComputeDialectsPass
   // Entry point for the pass.
   void runOnOperation() override {
     Operation *entryOp = getOperation();
+    if (ModuleOp mOp = llvm::dyn_cast<ModuleOp>(entryOp)) moduleOp = mOp;
     visitOperation(std::nullopt, entryOp);
+
+    // expand dialect sets to include dialects of all callees too
+    while (addDialectsOfCallees()) { /* until addDialectsOfCallees() returns false */}
 
     // add dialects as attributes to all operations, and add to top-level op set
     for (auto it = dialectsOf.begin(); it != dialectsOf.end(); ++it) {
@@ -81,18 +93,40 @@ struct ComputeDialectsPass
 
 private:
   std::map<Operation*, DialectsSet> dialectsOf;
+  std::map<Operation*, Callees> calleesOf;
+  std::optional<ModuleOp> moduleOp;
 
-  void addDialect(const std::optional<Operation*> op, const DialectName &dialectName) {
-    if (!op) return;
-    dialectsOf[*op].insert(dialectName);
+  bool addDialect(const std::optional<Operation*> op, const DialectName &dialectName) {
+    if (!op) return false;
+    auto [loc, inserted] = dialectsOf[*op].insert(dialectName);
+    return inserted;
   }
 
-  void addDialects(const std::optional<Operation*> op, const DialectsSet &dialects) {
-    if (!op) return;
+  bool addDialects(const std::optional<Operation*> op, const DialectsSet &dialects) {
+    if (!op) return false;
 
-    DialectsSet& opDialects { dialectsOf[*op] };
-    for (const auto& d : dialects)
-      opDialects.insert(d);
+    bool anyInserted = false;
+    for (const auto& d : dialects) {
+      if (addDialect(op, d)) anyInserted = true;
+    }
+    return anyInserted;
+  }
+
+  bool addDialectsOfCallees() {
+    // for every function operation, add every one of its callees' dialects too
+    // returns boolean for if any function's dialects have changed
+    bool anyChanged = false;
+
+    for (auto &[op, callees] : calleesOf) {
+      for (auto &callee : callees) {
+        // get callee's dialects
+        llvm::outs() << "moduleOp->lookupSymbol(" << callee << ") = " << moduleOp->lookupSymbol(callee) << "\n";
+        auto dialects = dialectsOf.at(moduleOp->lookupSymbol(callee));
+        if (addDialects(op, dialects)) anyChanged = true;
+      }
+    }
+
+    return anyChanged;
   }
 
   void loadDialectsAsAttrs(Operation *op, const DialectsSet& dialects, const std::string& attrKey = DIALECT_ATTR) {

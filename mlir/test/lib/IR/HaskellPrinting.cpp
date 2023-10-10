@@ -304,13 +304,20 @@ private:
 	std::optional<std::string> getSuffix() { return suffix; };
 
 	/* Check against predefined list of ops embedded in the "Standard" form. */
-	bool isStandard(llvm::StringRef opName) { return standardOps().contains(opName); };
+	static bool isStandard(llvm::StringRef opName) { return standardOps().contains(opName); };
 
 	/* Checks against predefined list of supported casting operations */
-	bool supportedCasting(llvm::StringRef opName) { return castingOps().contains(opName); };
+	static bool supportedCasting(llvm::StringRef opName) { return castingOps().contains(opName); };
 
 	/* supported terminator operations */
-	bool supportedTerminator(llvm::StringRef opName) { return terminatorOps().contains(opName); };
+	static bool supportedTerminator(llvm::StringRef opName) { return terminatorOps().contains(opName); };
+
+	/* related imports for interpretation, empty set if none needed */
+	static std::set<std::string> getRelatedImports(const std::string& library) {
+		auto rImports { relatedImports() }; 
+		if (rImports.find(library) != rImports.end()) return rImports.at(library);
+		return {};
+	};
 
 	/* 
 	"Standard" case: prints into the form:
@@ -369,10 +376,18 @@ private:
 				 << "import Data.Function\n"
 				 << "import Polysemy\n";
 
+		// dialects need to be imported, as well as related libraries (for interpreting dialects)
 		auto dialects = op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>();
+		std::set<std::string> imports;
 		for (const auto& dialect : dialects) {
-			stream() << "import " << capitalise(dialect.str()) << "\n";
+			std::string dialectModule { capitalise(dialect.str()) };
+			std::set<std::string> relatedModules { getRelatedImports(dialectModule) };
+			imports.insert(dialectModule);
+			imports.merge(getRelatedImports(dialectModule));
+		}
 
+		for (const auto& mod : imports) {
+			stream() << "import " << mod << "\n";
 		}
 	}
 	
