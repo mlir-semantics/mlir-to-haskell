@@ -36,6 +36,63 @@ static std::string capitalise(const std::string &word) {
 	return { newWord };
 }
 
+/* dialects printing */
+static std::optional<std::string> embedDialect(const std::string &dialect) {
+	llvm::StringMap<std::optional<std::string>> specialDialects = {
+		{"memref", "Memref s"},
+		{"func", std::nullopt}
+	};
+	if (specialDialects.contains(dialect)) 
+		return specialDialects.at(dialect);
+	if (dialect.empty()) 
+		return std::nullopt;
+	
+	// default printing method: capitalise first letter
+	return { capitalise(dialect) };
+}
+
+/* type printing */
+static std::string embedType(const mlir::Type t) {
+	if (t.isa<mlir::Float32Type>()) return "Float";
+	else if (t.isa<mlir::Float64Type>()) return "Double";
+	else if (t.isa<mlir::IndexType>()) return "IxType";
+	else if (auto mt = t.dyn_cast<mlir::MemRefType>()) return "MemrefType s " + embedType(mt.getElementType());
+	else return "UNSUPPORTED_TYPE";
+}
+
+/*
+Extract the region's dialects, stored within the attributes, as a vector
+*/
+static std::vector<std::string> getRegionDialects(Operation *op) {
+	std::vector<std::string> dialects;
+	for (const auto& dialect : op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>())
+		dialects.push_back(dialect.str());
+	return dialects;
+}
+
+struct Interpreter {
+	std::string fn;
+	int priority; // higher priority => top of the interpreter stack, applied last
+	Interpreter(std::string fn, int priority = 0) : fn{fn}, priority{priority} {}
+};
+
+bool operator==(const Interpreter& lhs, const Interpreter& rhs) {
+	return lhs.priority == rhs.priority && lhs.fn == rhs.fn;
+}
+
+struct InterpreterLT {
+bool operator()(const Interpreter& lhs, const Interpreter& rhs) {
+	return (lhs.priority <= rhs.priority) || 
+			((lhs.priority == rhs.priority) && (lhs.fn < rhs.fn));
+}
+};
+
+struct InterpreterGT {
+bool operator()(const Interpreter& lhs, const Interpreter& rhs) {
+	return !InterpreterLT()(lhs, rhs) && !(lhs == rhs);
+}
+};
+
 struct HaskellPrintingPass
     : public PassWrapper<HaskellPrintingPass, OperationPass<>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HaskellPrintingPass)
@@ -99,9 +156,13 @@ struct HaskellPrintingPass
   void runOnOperation() override {
 	stream() << "---- START OF HASKELL ----\n";
 
-    Operation *op = getOperation();
+	// op is the module-level op with 
+    Operation* op = getOperation();
     resetIndent();
     printOperation(op);
+
+	if (ModuleOp mOp = llvm::dyn_cast<ModuleOp>(op))
+		printMainFunction(mOp);
 
 	stream() << "---- END OF HASKELL ----\n";
   }
@@ -126,6 +187,39 @@ private:
 	else stream << "UNIMPLEMENTED " << op->getName();
 
 	return hp.getSuffix();
+  }
+
+  void printMainFunction(ModuleOp mOp, const std::string entry = "main") {
+	// look for the entry point function, return if none found
+	Operation* entryFn = mOp.lookupSymbol(entry);
+	if (entryFn == nullptr) return; 
+
+	// add interpreters for each of the dialects used
+	std::vector<Interpreter> interpreters;
+	for (const auto& dialect : getRegionDialects(entryFn)) {
+		const std::string dialectStr { capitalise(dialect) };
+		interpreters.push_back(Interpreter("run" + dialectStr));
+		// add necessary lower interpreter too 
+		std::vector<Interpreter> relatedInterpreters { HaskellOpPrinter::getRelatedInterpreters(dialectStr) };
+		interpreters.insert(interpreters.begin(), relatedInterpreters.begin(), relatedInterpreters.end());
+	}
+
+	// get interpreter stack in printable order
+	std::sort(interpreters.begin(), interpreters.end(), InterpreterGT());
+	interpreters.erase(
+		std::unique(interpreters.begin(), interpreters.end()), 
+		interpreters.end());
+
+	// print out function for execution
+	stream() << "main :: IO ()\n";
+	stream() << "main = do \n";
+	auto x = pushIndent();
+	printIndent(stream(), indent) << "(outs, res) <- return";
+	for (const auto& interp : interpreters)
+		stream() << " $ " << interp.fn;
+	stream() << "\n"; // entryFn's name
+	
+	printIndent(stream(), indent) << "putStrLn outs\n";
   }
 
   class HaskellOpPrinter {
@@ -179,38 +273,22 @@ private:
 		};
 	};
 
-	/* dialects printing */
-	static std::optional<std::string> embedDialect(const StringAttr &dialect) {
-		llvm::StringMap<std::optional<std::string>> specialDialects = {
-			{"memref", "Memref s"},
-			{"func", std::nullopt},
-			{"index", std::nullopt} // nullopt for now as is only type. in future effects will be added to index embedding 
-		};
-		if (specialDialects.contains(dialect.str())) 
-			return specialDialects.at(dialect.str());
-		if (dialect.str().empty()) 
-			return std::nullopt;
-		
-		// default printing method: capitalise first letter
-		return { capitalise(dialect.str()) };
-	};
-
-	/* type printing */
-	static std::string embedType(const mlir::Type t) {
-		if (t.isa<mlir::Float32Type>()) return "Float";
-		else if (t.isa<mlir::Float64Type>()) return "Double";
-		else if (t.isa<mlir::IndexType>()) return "IxType";
-		else if (auto mt = t.dyn_cast<mlir::MemRefType>()) return "MemrefType s " + embedType(mt.getElementType());
-		else return "UNSUPPORTED_TYPE";
-	}
-
 	void printValue(mlir::Value arg) { arg.printAsOperand(stream(), OpPrintingFlags()); };
 
 	/* Some dialects interpret into lower level dialects and these need to be imported also */
 	static std::map<std::string, std::set<std::string>> relatedImports() {
 		return {
 			{"Scf", {"ControlFlow"}},
-			{"Memref", {"Mutable", "Control.Monad.ST"}}
+			{"Memref", {"Mutable", "Control.Monad.ST"}},
+			{"Vector", {"Polysemy.Writer"}}
+		};
+	}
+
+	static std::map<std::string, std::vector<Interpreter>> relatedInterpreters() {
+		return {
+			{"Scf", {Interpreter("runControlFlow", 1)}},
+			{"Memref", {Interpreter("runMutable", 1), Interpreter("runM", 2), Interpreter("runST", 3)}},
+			{"Vector", {Interpreter("runWriterAssocR", 1)}}
 		};
 	}
 
@@ -264,7 +342,7 @@ private:
 	template <typename MemRefIndexingOp>
 	void printMemRefIndexingOp(MemRefIndexingOp op, const std::string opName, std::optional<Value> valueToStore = std::nullopt) {
 		printResultsWithAssign(op);
-		stream() << opName << " ";
+		stream() << "Memref." << opName << " ";
 		if (valueToStore) { 
 			printValue(*valueToStore);
 			stream() << " ";
@@ -316,11 +394,18 @@ private:
 	static bool supportedTerminator(llvm::StringRef opName) { return terminatorOps().contains(opName); };
 
 	/* related imports for interpretation, empty set if none needed */
-	static std::set<std::string> getRelatedImports(const std::string& library) {
+	static std::set<std::string> getRelatedImports(const std::string& dialect) {
 		auto rImports { relatedImports() }; 
-		if (rImports.find(library) != rImports.end()) return rImports.at(library);
+		if (rImports.find(dialect) != rImports.end()) return rImports.at(dialect);
 		return {};
 	};
+
+	/* related interpreters */
+	static std::vector<Interpreter> getRelatedInterpreters(const std::string& dialect) {
+		auto rInterpreters { relatedInterpreters() }; 
+		if (rInterpreters.find(dialect) != rInterpreters.end()) return rInterpreters.at(dialect);
+		return {};
+	}
 
 	/* 
 	"Standard" case: prints into the form:
@@ -329,7 +414,7 @@ private:
 	void printStandard(llvm::StringRef opName, Operation *op) {
 		assert(isStandard(opName) && "printStandard called on operation not within isStandard() list.");
 		printResultsWithAssign(op);
-		stream() << /* capitalise(opName.str()) */ standardOps().at(opName) << " ";
+		stream() << capitalise(op->getDialect()->getNamespace().str()) << "." << standardOps().at(opName) << " ";
 		printOperands(op);
 	};
 
@@ -398,7 +483,7 @@ private:
 		mlir::MemRefType memRefType = op.getType();
 
 		printResults(op); // SSA value
-		stream() << " :: " << embedType(memRefType) << " <- allocND [";
+		stream() << " :: " << embedType(memRefType) << " <- Memref.allocND [";
 		llvm::interleave( // print memref sizes
 			memRefType.getShape(), 
 			stream(), 
@@ -414,7 +499,7 @@ private:
 
 	void print(scf::ForOp op) {
 		printResultsWithAssign(op);
-		stream() << "for ";
+		stream() << "Scf.for ";
 		printValue(op.getLowerBound());
 		stream() << " ";
 		printValue(op.getUpperBound());
@@ -435,9 +520,8 @@ private:
 		// signature, typeclass
 		assert(op->hasAttrOfType<ArrayAttr>(DIALECT_ATTR));
 		stream() << op.getSymName().str() << functionNameSuffix << " :: ";
-		auto dialects = op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>();
 		std::vector<std::string> dialectEmbedding;
-		for (const auto& dialect : dialects) {
+		for (const auto& dialect : getRegionDialects(op)) {
 			std::optional<std::string> embedded { embedDialect(dialect) };
 			if (embedded) dialectEmbedding.push_back(*embedded);
 		}

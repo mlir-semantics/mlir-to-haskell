@@ -120,9 +120,9 @@ private:
     for (auto &[op, callees] : calleesOf) {
       for (auto &callee : callees) {
         // get callee's dialects
-        llvm::outs() << "moduleOp->lookupSymbol(" << callee << ") = " << moduleOp->lookupSymbol(callee) << "\n";
         auto dialects = dialectsOf.at(moduleOp->lookupSymbol(callee));
-        if (addDialects(op, dialects)) anyChanged = true;
+        if (addDialects(op, dialects))
+          anyChanged = true;
       }
     }
 
