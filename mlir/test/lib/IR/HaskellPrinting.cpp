@@ -21,6 +21,8 @@ namespace {
 
 static const std::string DIALECT_ATTR = "__hask.dialects";
 static const std::string TAB = "    ";
+/* suffix for MLIR functions (to distinguish from Haskell namespace) */
+static inline std::string FUNCTIONS_SUFFIX = "_mlir";  
 
 typedef llvm::raw_ostream stream_t; 
 
@@ -197,10 +199,12 @@ private:
 	// add interpreters for each of the dialects used
 	std::vector<Interpreter> interpreters;
 	for (const auto& dialect : getRegionDialects(entryFn)) {
-		const std::string dialectStr { capitalise(dialect) };
-		interpreters.push_back(Interpreter("run" + dialectStr));
+		std::optional<std::string> interpreterFn = getDialectInterpreterFn(dialect);
+		if (!interpreterFn) continue;
+
+		interpreters.push_back(Interpreter(*interpreterFn));
 		// add necessary lower interpreter too 
-		std::vector<Interpreter> relatedInterpreters { HaskellOpPrinter::getRelatedInterpreters(dialectStr) };
+		std::vector<Interpreter> relatedInterpreters { HaskellOpPrinter::getRelatedInterpreters(dialect) };
 		interpreters.insert(interpreters.begin(), relatedInterpreters.begin(), relatedInterpreters.end());
 	}
 
@@ -217,9 +221,14 @@ private:
 	printIndent(stream(), indent) << "(outs, res) <- return";
 	for (const auto& interp : interpreters)
 		stream() << " $ " << interp.fn;
-	stream() << "\n"; // entryFn's name
-	
+	stream() << " " << entry << FUNCTIONS_SUFFIX << "\n";
+
 	printIndent(stream(), indent) << "putStrLn outs\n";
+  }
+
+  std::optional<std::string> getDialectInterpreterFn(const std::string& dialect) {
+	if (dialect == "func") return {};
+	return "run" + capitalise(dialect);
   }
 
   class HaskellOpPrinter {
@@ -235,10 +244,7 @@ private:
 	std::optional<std::string> suffix;
 	void setSuffix(std::string newSuffix) { suffix = newSuffix; };
 
-	int indent;
-
-	/* suffix for MLIR functions (to distinguish from Haskell namespace) */
-	static inline std::string functionNameSuffix = "_mlir";   
+	int indent; 
 
 	/* operations to be printed in the "Standard" form */
 	static llvm::StringMap<std::string> standardOps() {
@@ -286,9 +292,9 @@ private:
 
 	static std::map<std::string, std::vector<Interpreter>> relatedInterpreters() {
 		return {
-			{"Scf", {Interpreter("runControlFlow", 1)}},
-			{"Memref", {Interpreter("runMutable", 1), Interpreter("runM", 2), Interpreter("runST", 3)}},
-			{"Vector", {Interpreter("runWriterAssocR", 1)}}
+			{"scf", {Interpreter("runControlFlow", 1)}},
+			{"memref", {Interpreter("runMutable", 1), Interpreter("runM", 2), Interpreter("runST", 3)}},
+			{"vector", {Interpreter("runWriterAssocR", 1)}}
 		};
 	}
 
@@ -519,7 +525,7 @@ private:
 	void print(func::FuncOp op) {		
 		// signature, typeclass
 		assert(op->hasAttrOfType<ArrayAttr>(DIALECT_ATTR));
-		stream() << op.getSymName().str() << functionNameSuffix << " :: ";
+		stream() << op.getSymName().str() << FUNCTIONS_SUFFIX << " :: ";
 		std::vector<std::string> dialectEmbedding;
 		for (const auto& dialect : getRegionDialects(op)) {
 			std::optional<std::string> embedded { embedDialect(dialect) };
@@ -554,7 +560,7 @@ private:
 		stream() << ")\n";
 
 		// function definition
-		printIndent(stream(), indent) << op.getSymName().str() << functionNameSuffix << " ";
+		printIndent(stream(), indent) << op.getSymName().str() << FUNCTIONS_SUFFIX << " ";
 
 		// print arg names, which are arguments to the first block in the attached region
 		Block& firstBlock { op.getRegion().front() };
@@ -567,7 +573,7 @@ private:
 
 	void print(func::CallOp op) {
 		printResults(op);
-		stream() << op.getCallee().str() << functionNameSuffix << " ";
+		stream() << op.getCallee().str() << FUNCTIONS_SUFFIX << " ";
 		printOperands(op);
 	};
   };
