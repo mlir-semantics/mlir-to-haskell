@@ -59,6 +59,13 @@ static std::string embedType(const mlir::Type t) {
 	else if (t.isa<mlir::Float64Type>()) return "Double";
 	else if (t.isa<mlir::IndexType>()) return "IxType";
 	else if (auto mt = t.dyn_cast<mlir::MemRefType>()) return "MemrefType s " + embedType(mt.getElementType());
+	else if (t.isa<mlir::IntegerType>()) {
+		// TODO: use dynamic width / signedness integers embedded types instead. 
+		// Right now just embeds all widths into Int (32 bits), apart from width 1, which goes into Boolean.
+		auto tInt = t.dyn_cast<mlir::IntegerType>();
+		if (tInt.getWidth() == 1) return "Bool";
+		else return "Int"; 
+	}
 	else return "UNSUPPORTED_TYPE";
 }
 
@@ -186,6 +193,7 @@ private:
 	else if (opName.equals("memref.alloc")) hp.print(llvm::dyn_cast<memref::AllocOp>(op)); // dependent return type
 	else if (opName.equals("memref.load")) hp.print(llvm::dyn_cast<memref::LoadOp>(op)); // variadic operands
 	else if (opName.equals("memref.store")) hp.print(llvm::dyn_cast<memref::StoreOp>(op)); // variadic operands
+	else if (opName.equals("arith.cmpi")) hp.print(llvm::dyn_cast<arith::CmpIOp>(op)); // semantics differs according to an enum attribute
 	else stream << "UNIMPLEMENTED " << op->getName();
 
 	return hp.getSuffix();
@@ -484,6 +492,13 @@ private:
 			stream() << "import " << mod << "\n";
 		}
 	}
+
+	void print(arith::CmpIOp op) {
+		// stringify predicates
+		// 	stringifyCmpIPredicate(op.getPredicate())
+		// print LHS and RHS
+		// 	op.getLhs(); op.getRhs()
+	}
 	
 	void print(memref::AllocOp op) {
 		mlir::MemRefType memRefType = op.getType();
@@ -572,7 +587,7 @@ private:
 	};
 
 	void print(func::CallOp op) {
-		printResults(op);
+		printResultsWithAssign(op);
 		stream() << op.getCallee().str() << FUNCTIONS_SUFFIX << " ";
 		printOperands(op);
 	};
