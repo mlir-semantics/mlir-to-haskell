@@ -62,9 +62,10 @@ static std::string embedType(const mlir::Type t) {
 	else if (t.isa<mlir::IntegerType>()) {
 		// TODO: use dynamic width / signedness integers embedded types instead. 
 		// Right now just embeds all widths into Int (32 bits), apart from width 1, which goes into Boolean.
-		auto tInt = t.dyn_cast<mlir::IntegerType>();
-		if (tInt.getWidth() == 1) return "Bool";
-		else return "Int"; 
+		// auto tInt = t.dyn_cast<mlir::IntegerType>();
+		// if (tInt.getWidth() == 1) return "Bool";
+		// else return "Int"; 
+		return "Int";
 	}
 	else return "UNSUPPORTED_TYPE";
 }
@@ -85,6 +86,8 @@ struct Interpreter {
 	Interpreter(std::string fn, int priority = 0) : fn{fn}, priority{priority} {}
 };
 
+const int INTERPRETER_TOP_PRIORITY = 10;
+
 bool operator==(const Interpreter& lhs, const Interpreter& rhs) {
 	return lhs.priority == rhs.priority && lhs.fn == rhs.fn;
 }
@@ -102,9 +105,17 @@ bool operator()(const Interpreter& lhs, const Interpreter& rhs) {
 }
 };
 
+struct HaskellPrintingPassOptions {
+  std::string entry;
+};
+
 struct HaskellPrintingPass
     : public PassWrapper<HaskellPrintingPass, OperationPass<>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HaskellPrintingPass)
+
+  // HaskellPrintingPass() : OperationPass<>(mlir::TypeID::get<HaskellPrintingPass>()) { entry = "main"; }
+  // HaskellPrintingPass(const HaskellPrintingPass &other) : OperationPass<>(other) {}
+  // HaskellPrintingPass(const HaskellPrintingPassOptions &options) : HaskellPrintingPass() { entry = options.entry; }
 
   StringRef getArgument() const final { return "to-haskell"; }
   StringRef getDescription() const final { return "Print into Haskell embedding."; }
@@ -176,6 +187,14 @@ struct HaskellPrintingPass
 	stream() << "---- END OF HASKELL ----\n";
   }
 
+protected:
+	std::string entry = "main";
+//   ::mlir::Pass::Option<std::string> entry{
+// 		*this, 
+//   		"entry", 
+// 		::llvm::cl::desc("Entry point of the MLIR script. Default main."), 
+// 		llvm::cl::init("main")};
+
 private:
   std::optional<std::string> printOpLine(stream_t &stream, Operation *op) {
 	// print the operation, polymorphic on operation type
@@ -199,7 +218,7 @@ private:
 	return hp.getSuffix();
   }
 
-  void printMainFunction(ModuleOp mOp, const std::string entry = "main") {
+  void printMainFunction(ModuleOp mOp) {
 	// look for the entry point function, return if none found
 	Operation* entryFn = mOp.lookupSymbol(entry);
 	if (entryFn == nullptr) return; 
@@ -221,6 +240,10 @@ private:
 	interpreters.erase(
 		std::unique(interpreters.begin(), interpreters.end()), 
 		interpreters.end());
+
+	// check top-level interpreter exists. If not we add the default one in, which is just `run`.
+	if (interpreters.empty() || interpreters.front().priority < INTERPRETER_TOP_PRIORITY)
+		interpreters.insert(interpreters.begin(), Interpreter("run", INTERPRETER_TOP_PRIORITY));
 
 	// print out function for execution
 	stream() << "main :: IO ()\n";
@@ -301,7 +324,7 @@ private:
 	static std::map<std::string, std::vector<Interpreter>> relatedInterpreters() {
 		return {
 			{"scf", {Interpreter("runControlFlow", 1)}},
-			{"memref", {Interpreter("runMutable", 1), Interpreter("runM", 2), Interpreter("runST", 3)}},
+			{"memref", {Interpreter("runMutable", 1), Interpreter("runM", 2), Interpreter("runST", INTERPRETER_TOP_PRIORITY)}},
 			{"vector", {Interpreter("runWriterAssocR", 1)}}
 		};
 	}
@@ -390,8 +413,9 @@ private:
 	void printConstantLike_(ConstantLikeOp op) {
 		// TODO: maybe also add type printing here
 		printResultsWithAssign(op); 
-		stream() << "return ";
+		stream() << "return (";
 		op.getValueAttr().print(stream(), true);
+		stream() << ")";
 	}
 
   public:
@@ -494,10 +518,13 @@ private:
 	}
 
 	void print(arith::CmpIOp op) {
-		// stringify predicates
-		// 	stringifyCmpIPredicate(op.getPredicate())
+		printResultsWithAssign(op);
+		stream() << "Arith.cmpi \"" 
+				 << arith::stringifyCmpIPredicate(op.getPredicate()) << "\" ";
 		// print LHS and RHS
-		// 	op.getLhs(); op.getRhs()
+		printValue(op.getLhs());
+		stream() << " ";
+		printValue(op.getRhs());
 	}
 	
 	void print(memref::AllocOp op) {
