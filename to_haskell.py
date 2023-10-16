@@ -22,12 +22,18 @@ def substr_between(original: str, head: str, tail: str) -> str:
     '''
     return original.split(tail)[0].split(head)[1].strip()
 
-def get_haskell_variable_names(original: str) -> str:
-    return re.sub(r'%(\w+)', r'_\g<1>', original)
+def to_haskell_variable_name(m: re.Match) -> str:
+    # replaces variable prefix % by an underscore _
+    # some variables can still have dashes in them, we remove these and replace with '_n_'
+    return 'v_' + m.group(1).replace('-', '_n_')
+
+def replace_by_haskell_variable_names(original: str) -> str:
+    haskellified = re.sub(r'%([\w-]+)', to_haskell_variable_name, original)
+    return haskellified
 
 def get_haskell(raw_string: str) -> str:
     cut_string = substr_between(raw_string, "---- START OF HASKELL ----", "---- END OF HASKELL ----")
-    haskell_file = get_haskell_variable_names(cut_string)
+    haskell_file = replace_by_haskell_variable_names(cut_string)
     return haskell_file
 
 def main():
