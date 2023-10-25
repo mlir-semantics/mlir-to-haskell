@@ -53,19 +53,24 @@ static std::optional<std::string> embedDialect(const std::string &dialect) {
 	return { capitalise(dialect) };
 }
 
+/* arith: signedness semantics */
+static std::string embedSignedness(IntegerType::SignednessSemantics s) {
+	return s == IntegerType::SignednessSemantics::Unsigned ? "Unsigned" 
+			: s == IntegerType::SignednessSemantics::Signed ? "Signed"
+			: "Signless";
+}
+
 /* type printing */
 static std::string embedType(const mlir::Type t) {
-	if (t.isa<mlir::Float32Type>()) return "Float";
-	else if (t.isa<mlir::Float64Type>()) return "Double";
+	if (t.isa<mlir::Float32Type>()) return "MLIRFloat 32";
+	else if (t.isa<mlir::Float64Type>()) return "MLIRFloat 64";
 	else if (t.isa<mlir::IndexType>()) return "IxType";
 	else if (auto mt = t.dyn_cast<mlir::MemRefType>()) return "MemrefType s " + embedType(mt.getElementType());
 	else if (t.isa<mlir::IntegerType>()) {
-		// TODO: use dynamic width / signedness integers embedded types instead. 
-		// Right now just embeds all widths into Int (32 bits), apart from width 1, which goes into Boolean.
-		// auto tInt = t.dyn_cast<mlir::IntegerType>();
-		// if (tInt.getWidth() == 1) return "Bool";
-		// else return "Int"; 
-		return "Int";
+		auto tInt = t.dyn_cast<mlir::IntegerType>();
+		return std::string("MLIRInt ") + 
+			   "'" + embedSignedness(tInt.getSignedness()) + " " + 
+			   std::to_string(tInt.getWidth());
 	}
 	else return "UNSUPPORTED_TYPE";
 }
@@ -188,7 +193,7 @@ struct HaskellPrintingPass
   }
 
 protected:
-	std::string entry = "main";
+	std::string entry = "entry";
 //   ::mlir::Pass::Option<std::string> entry{
 // 		*this, 
 //   		"entry", 
@@ -285,7 +290,7 @@ private:
 			{"arith.mulf", "mult"},
 			{"arith.negf", "negative"},
 			{"arith.divf", "divide"},
-			{"arith.uitofp", "intToFp"},
+			{"arith.uitofp", "uitofp"},
 			{"index.sub", "sub"},
 			{"memref.dim", "dim"},
 			{"memref.dealloc", "deallocMemref"},
@@ -310,7 +315,10 @@ private:
 		};
 	};
 
-	void printValue(mlir::Value arg) { arg.printAsOperand(stream(), OpPrintingFlags()); };
+	void printValue(mlir::Value arg, bool printType = false) { 
+		arg.printAsOperand(stream(), OpPrintingFlags());
+		if (printType) stream() << " :: " << embedType(arg.getType());
+	};
 
 	/* Some dialects interpret into lower level dialects and these need to be imported also */
 	static std::map<std::string, std::set<std::string>> relatedImports() {
@@ -334,16 +342,18 @@ private:
 		indexed_accessor_range_base<>
 	*/
 	template <typename Container>
-	void printValuesInterleave(const std::string &sep, const Container &c) {
-		llvm::interleave(c, stream(), [&](mlir::Value arg) { printValue(arg); }, sep.c_str());
+	void printValuesInterleave(const std::string &sep, const Container &c,
+							   bool printType = false) {
+		llvm::interleave(c, stream(), [&](mlir::Value arg) { printValue(arg, printType); }, sep.c_str());
 	};
 
 	template <typename Container>
 	void printValues(const Container &c,
 					 const std::string sep = ", ",
-					 const std::string openB = "", const std::string closeB = "") {
+					 const std::string openB = "", const std::string closeB = "",
+					 bool printType = false) {
 		stream() << openB;
-		printValuesInterleave(sep, c);
+		printValuesInterleave(sep, c, printType);
 		stream() << closeB;
 	}
 
@@ -359,9 +369,9 @@ private:
 		(v0, v1, ..., vn)
 	*/
 	template <typename Container>
-	void printValueTuple(const Container &c) {
-		if (c.size() == 1) printValues(c, "");
-		else printValues(c, ", ", "(", ")");
+	void printValueTuple(const Container &c, bool printType = false) {
+		if (c.size() == 1) printValues(c, "", "", "", printType);
+		else printValues(c, ", ", "(", ")", printType);
 	};
 
 	template <typename Container>
@@ -393,29 +403,49 @@ private:
 	results section, for operations that creates SSA values 
 	returns boolean, if any SSA values were created. 
 	*/
-	bool printResults(Operation *op) {
+	bool printResults(Operation *op, bool printType = false) {
 		unsigned nValues = op->getNumResults();
 		if (nValues == 0) return false;
-		printValueTuple(op->getResults());
+		printValueTuple(op->getResults(), printType);
 		return true;
 	};
 
-	void printResultsWithAssign(Operation *op) { if (printResults(op)) stream() << " <- "; };
+	void printResultsWithAssign(Operation *op, bool printType = false) { 
+		if (printResults(op, printType)) {stream() << " <- "; }
+	}
+
+	void embedConstant(arith::ConstantOp op) {
+		mlir::Type t = op.getValueAttr().getType();
+		
+		// build constructor
+		if (t.isa<mlir::Float32Type>()) stream() << "F32 ";
+		else if (t.isa<mlir::Float64Type>()) stream() << "F64 ";
+		else if (mlir::IntegerType it = t.dyn_cast<mlir::IntegerType>()) {
+			std::string constructor {
+				it.getSignedness() == IntegerType::SignednessSemantics::Signed ? "SInt"
+				: it.getSignedness() == IntegerType::SignednessSemantics::Unsigned ? "UInt"
+				: "Int"
+			};
+			stream() << constructor << " ";
+		}
+		else stream() << "UNSUPPORTED ARITH CONSTANT OP: ";
+
+		// prints value
+		stream() << "(";
+		op.getValueAttr().print(stream(), true);
+		stream() << ")";
+	}
 
 	/*
-	"Constant"-like case: prints the single value attribute as a return.
+	"Constant"-like default case: prints the single value attribute as a return.
 
 	Requirements on ConstantLikeOp:
 	- Subclass of Operation*
 	- Should have a `::getValueAttr()` function.
 	*/
 	template <typename ConstantLikeOp>
-	void printConstantLike_(ConstantLikeOp op) {
-		// TODO: maybe also add type printing here
-		printResultsWithAssign(op); 
-		stream() << "return (";
+	void defaultConstantEmbedding(ConstantLikeOp op) {
 		op.getValueAttr().print(stream(), true);
-		stream() << ")";
 	}
 
   public:
@@ -471,10 +501,19 @@ private:
 
 	void printConstantLike(Operation *op) {
 		assert(op->hasTrait<mlir::OpTrait::ConstantLike>() && "expected operation with CosntantLike trait");
+		
+		// assignment and return statement
+		printResultsWithAssign(op, true); 
+		stream() << "return (";		
+
+		// print constant value embedding
 		llvm::StringRef opName {op->getName().getStringRef()};
-		if (opName.equals("index.constant")) printConstantLike_(llvm::dyn_cast<index::ConstantOp>(op));
-		else if (opName.equals("arith.constant")) printConstantLike_(llvm::dyn_cast<arith::ConstantOp>(op));
-		else stream() << "UNSUPPORTED CONSTANT OPERATION: " << opName;
+		if (opName.equals("index.constant")) defaultConstantEmbedding(llvm::dyn_cast<index::ConstantOp>(op));
+		else if (opName.equals("arith.constant")) embedConstant(llvm::dyn_cast<arith::ConstantOp>(op));
+		else stream() << "UNSUPPORTED CONSTANT PRINTING: " << opName;
+
+		// closing bracket
+		stream() << ")";
 	};
 
 	void printCasting(Operation *op) {
