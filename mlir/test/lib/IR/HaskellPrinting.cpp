@@ -54,7 +54,7 @@ static std::optional<std::string> embedDialect(const std::string &dialect) {
 }
 
 /* arith: signedness semantics */
-static std::string embedSignedness(IntegerType::SignednessSemantics s) {
+static std::string embedSignedness(const IntegerType::SignednessSemantics s) {
 	return s == IntegerType::SignednessSemantics::Unsigned ? "Unsigned" 
 			: s == IntegerType::SignednessSemantics::Signed ? "Signed"
 			: "Signless";
@@ -65,7 +65,7 @@ static std::string embedType(const mlir::Type t) {
 	if (t.isa<mlir::Float32Type>()) return "MLIRFloat 32";
 	else if (t.isa<mlir::Float64Type>()) return "MLIRFloat 64";
 	else if (t.isa<mlir::IndexType>()) return "IxType";
-	else if (auto mt = t.dyn_cast<mlir::MemRefType>()) return "MemrefType s " + embedType(mt.getElementType());
+	else if (auto mt = t.dyn_cast<mlir::MemRefType>()) return "MemrefType s (" + embedType(mt.getElementType()) + ")";
 	else if (t.isa<mlir::IntegerType>()) {
 		auto tInt = t.dyn_cast<mlir::IntegerType>();
 		return std::string("MLIRInt ") + 
@@ -285,13 +285,24 @@ private:
 	/* operations to be printed in the "Standard" form */
 	static llvm::StringMap<std::string> standardOps() {
 		return {
-			{"arith.addf", "add"},
-			{"arith.addi", "add"},
-			{"arith.mulf", "mult"},
-			{"arith.negf", "negative"},
-			{"arith.divf", "divide"},
+			{"arith.addf", "addf"},
+			{"arith.addi", "addi"},
+			{"arith.mulf", "mulf"},
+			{"arith.negf", "negf"},
+			{"arith.divf", "divf"},
 			{"arith.uitofp", "uitofp"},
+			{"arith.sitofp", "sitofp"},
+			{"arith.shli", "shli"},
+			{"arith.shrsi", "shrsi"},
+			{"arith.shrui", "shrui"},
+			{"arith.minui", "minui"},
+			{"arith.minsi", "minsi"},
+			{"arith.maxui", "maxui"},
+			{"arith.maxsi", "maxsi"},
+			{"arith.muli", "muli"},
 			{"index.sub", "sub"},
+			{"index.casts", "casts"},
+			{"index.castu", "castu"},
 			{"memref.dim", "dim"},
 			{"memref.dealloc", "deallocMemref"},
 			{"vector.print", "print"}
@@ -539,7 +550,8 @@ private:
 				 << "FlexibleContexts, TypeOperators, DataKinds, PolyKinds, ScopedTypeVariables #-}\n\n"
 				 << "module Main where\n" 
 				 << "import Data.Function\n"
-				 << "import Polysemy\n";
+				 << "import Polysemy\n"
+				 << "import Builtin\n";
 
 		// dialects need to be imported, as well as related libraries (for interpreting dialects)
 		auto dialects = op->getAttrOfType<ArrayAttr>(DIALECT_ATTR).getAsRange<StringAttr>();
