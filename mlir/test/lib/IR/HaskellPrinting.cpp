@@ -60,12 +60,50 @@ static std::string embedSignedness(const IntegerType::SignednessSemantics s) {
 			: "Signless";
 }
 
+static std::string printDims(mlir::MemRefType mt) {
+	std::ostringstream oss;
+	oss << "'[";
+	for (int i = 0; i < mt.getRank(); i++) {
+		if (mt.isDynamicDim(i)) {
+			oss << "D";
+		} else {
+			oss << "I " << std::to_string(mt.getDimSize(i));
+		}
+		oss << ", ";
+	}
+	oss << "]";
+	return oss.str();
+}
+
+static std::string printRank(mlir::MemRefType mt) {
+	std::ostringstream oss;
+	if (mt.hasRank()) {
+		return "'Ranked " + printDims(mt);
+	} else {
+		return "'Unranked";
+	}
+}
+
+static std::string printLayout(mlir::MemRefType mt) {
+	std::ostringstream oss;
+	if (mt.getLayout().isIdentity()) {
+		oss << "'Strided ('StridesT " + printDims(mt) + ") ('I 0)"; // some Strided s o
+	} else {
+		// mlir::AffineMap amap = mt.getLayout().getAffineMap();
+		oss << "'Affine";
+	}
+	return oss.str();
+}
+
 /* type printing */
 static std::string embedType(const mlir::Type t) {
 	if (t.isa<mlir::Float32Type>()) return "MLIRFloat 32";
 	else if (t.isa<mlir::Float64Type>()) return "MLIRFloat 64";
 	else if (t.isa<mlir::IndexType>()) return "IxType";
-	else if (auto mt = t.dyn_cast<mlir::MemRefType>()) return "MemrefType s (" + embedType(mt.getElementType()) + ")";
+	else if (auto mt = t.dyn_cast<mlir::MemRefType>()) {
+		std::string elemType { embedType(mt.getElementType()) };
+		return "MemrefType s (" + printRank(mt) + ") (" + printLayout(mt) + ") (" + elemType + ")";
+	}
 	else if (t.isa<mlir::IntegerType>()) {
 		auto tInt = t.dyn_cast<mlir::IntegerType>();
 		return std::string("MLIRInt ") + 
@@ -206,8 +244,7 @@ private:
 	llvm::StringRef opName {op->getName().getStringRef()};
 
 	HaskellOpPrinter hp(stream, indent);
-	if (hp.isStandard(opName)) hp.printStandard(opName, op);
-	else if (hp.supportedCasting(opName)) hp.printCasting(op);
+	if (hp.isSupportedCasting(opName)) hp.printCasting(op);
 	else if (op->hasTrait<mlir::OpTrait::IsTerminator>()) hp.printTerminator(opName, op);
 	else if (op->hasTrait<mlir::OpTrait::ConstantLike>()) hp.printConstantLike(op);
 	else if (opName.equals("builtin.module")) hp.print(llvm::dyn_cast<ModuleOp>(op)); // not an effect in Haskell 
@@ -218,6 +255,7 @@ private:
 	else if (opName.equals("memref.load")) hp.print(llvm::dyn_cast<memref::LoadOp>(op)); // variadic operands
 	else if (opName.equals("memref.store")) hp.print(llvm::dyn_cast<memref::StoreOp>(op)); // variadic operands
 	else if (opName.equals("arith.cmpi")) hp.print(llvm::dyn_cast<arith::CmpIOp>(op)); // semantics differs according to an enum attribute
+	else if (hp.isSupported(opName)) hp.printStandard(opName, op); // normal (values)* <- op_name (operands)* printing method
 	else stream << "UNIMPLEMENTED " << op->getName();
 
 	return hp.getSuffix();
@@ -283,31 +321,31 @@ private:
 	int indent; 
 
 	/* operations to be printed in the "Standard" form */
-	static llvm::StringMap<std::string> standardOps() {
+	static llvm::StringSet<> supportedOps() {
 		return {
-			{"arith.addf", "addf"},
-			{"arith.addi", "addi"},
-			{"arith.mulf", "mulf"},
-			{"arith.negf", "negf"},
-			{"arith.divf", "divf"},
-			{"arith.uitofp", "uitofp"},
-			{"arith.sitofp", "sitofp"},
-			{"arith.shli", "shli"},
-			{"arith.shrsi", "shrsi"},
-			{"arith.shrui", "shrui"},
-			{"arith.minui", "minui"},
-			{"arith.minsi", "minsi"},
-			{"arith.maxui", "maxui"},
-			{"arith.maxsi", "maxsi"},
-			{"arith.muli", "muli"},
-			{"index.sub", "sub"},
-			{"index.casts", "casts"},
-			{"index.castu", "castu"},
-			{"memref.dim", "dim"},
-			{"memref.dealloc", "deallocMemref"},
-			{"vector.print", "print"}
+			"arith.addf",
+			"arith.addi",
+			"arith.mulf",
+			"arith.negf",
+			"arith.divf",
+			"arith.uitofp",
+			"arith.sitofp",
+			"arith.shli",
+			"arith.shrsi",
+			"arith.shrui",
+			"arith.minui",
+			"arith.minsi",
+			"arith.maxui",
+			"arith.maxsi",
+			"arith.muli",
+			"index.sub",
+			"index.casts",
+			"index.castu",
+			"memref.dim",
+			"memref.dealloc",
+			"vector.print"
 		};
-	};
+	}
 
 	/* casting ops have trivial embedding in Haskell, and will be translated as `return` */
 	static llvm::StringSet<> castingOps() {
@@ -464,13 +502,13 @@ private:
 	std::optional<std::string> getSuffix() { return suffix; };
 
 	/* Check against predefined list of ops embedded in the "Standard" form. */
-	static bool isStandard(llvm::StringRef opName) { return standardOps().contains(opName); };
+	static bool isSupported(llvm::StringRef opName) { return supportedOps().contains(opName); };
 
 	/* Checks against predefined list of supported casting operations */
-	static bool supportedCasting(llvm::StringRef opName) { return castingOps().contains(opName); };
+	static bool isSupportedCasting(llvm::StringRef opName) { return castingOps().contains(opName); };
 
 	/* supported terminator operations */
-	static bool supportedTerminator(llvm::StringRef opName) { return terminatorOps().contains(opName); };
+	static bool isSupportedTerminator(llvm::StringRef opName) { return terminatorOps().contains(opName); };
 
 	/* related imports for interpretation, empty set if none needed */
 	static std::set<std::string> getRelatedImports(const std::string& dialect) {
@@ -488,12 +526,15 @@ private:
 
 	/* 
 	"Standard" case: prints into the form:
-		{standardOps[opName]} <operand0> <operand1> ... <operandn>
+		{capitalise(opName)} <operand0> <operand1> ... <operandn>
 	*/
 	void printStandard(llvm::StringRef opName, Operation *op) {
-		assert(isStandard(opName) && "printStandard called on operation not within isStandard() list.");
+		assert(isSupported(opName) && "printStandard called on operation not within supported() list.");
 		printResultsWithAssign(op);
-		stream() << capitalise(op->getDialect()->getNamespace().str()) << "." << standardOps().at(opName) << " ";
+		// if (exceptionOps().contains(opName))
+		// 	stream() << capitalise(op->getDialect()->getNamespace().str()) << "." << opName << " ";
+		// else 
+			stream() << capitalise(opName.str()) << " ";
 		printOperands(op);
 	};
 
@@ -505,7 +546,7 @@ private:
 		{terminatorOps[opName]} operand0
 	*/
 	void printTerminator(llvm::StringRef opName, Operation *op) {
-		assert(supportedTerminator(opName) && "printTerminator() called on unsupported operation");
+		assert(isSupportedTerminator(opName) && "printTerminator() called on unsupported operation");
 		stream() << terminatorOps().at(opName) << " ";
 		printValueTuple(op->getOperands());
 	};
@@ -515,7 +556,9 @@ private:
 		
 		// assignment and return statement
 		printResultsWithAssign(op, true); 
-		stream() << "return (";		
+		stream() << "return (";
+
+		// mlir::Type t = op->getValueAttr().getType();
 
 		// print constant value embedding
 		llvm::StringRef opName {op->getName().getStringRef()};
@@ -529,7 +572,7 @@ private:
 
 	void printCasting(Operation *op) {
 		const llvm::StringRef opName = op->getName().getStringRef();
-		assert(supportedCasting(opName) && "expected a supported casting operation");
+		assert(isSupportedCasting(opName) && "expected a supported casting operation");
 		// check for self, ensure Op has supported form to be casted (single input & output)
 		assert(op->hasTrait<mlir::CastOpInterface::Trait>() && 
 			   op->hasTrait<mlir::OpTrait::OneResult>() && 
@@ -582,14 +625,17 @@ private:
 		mlir::MemRefType memRefType = op.getType();
 
 		printResults(op); // SSA value
-		stream() << " :: " << embedType(memRefType) << " <- Memref.allocND [";
-		llvm::interleave( // print memref sizes
-			memRefType.getShape(), 
-			stream(), 
-			[&](int64_t arg) { stream() << arg; }, 
-			", "
-		); 
-		stream() << "]";
+		stream() << " :: " << embedType(memRefType) << " <- Memref.alloc ";
+		printValues(op.getDynamicSizes(), ", ", "[", "]");
+
+		
+
+		// llvm::interleave( // print memref sizes
+		// 	memRefType.getShape(), 
+		// 	stream(), 
+		// 	[&](int64_t arg) { stream() << arg; }, 
+		// 	", "
+		// ); 
 	};
 
 	void print(memref::LoadOp op) {	printMemRefIndexingOp(op, "load"); };
